@@ -1,7 +1,6 @@
 import json
 import os
 import queue
-import socket
 import subprocess
 import sys
 import tempfile
@@ -10,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from urllib.request import urlopen
+from urllib.parse import urlsplit
 
 from desktop import host
 
@@ -54,18 +54,47 @@ class DesktopHostTests(unittest.TestCase):
 
     def test_reuses_matching_server_before_considering_another_free_port(self):
         with patch.object(host.launcher, "health", side_effect=lambda port: {"data_directory": str(self.root)} if port == 8767 else None), \
-                patch.object(host.launcher, "port_open", return_value=False):
+                patch.object(host.launcher, "port_available", side_effect=lambda port: port != 8767):
             self.assertEqual(host.choose_port(self.root), (8767, False))
 
     def test_never_reuses_another_workspaces_server(self):
         with patch.object(host.launcher, "health", side_effect=lambda port: {"data_directory": str(self.root / "other")} if port == 8765 else None), \
-                patch.object(host.launcher, "port_open", return_value=False):
+                patch.object(host.launcher, "port_available", side_effect=lambda port: port != 8765):
             self.assertEqual(host.choose_port(self.root), (8766, True))
 
     def test_busy_preferred_port_fails_without_replacing_existing_process(self):
-        with patch.object(host.launcher, "health", return_value=None), patch.object(host.launcher, "port_open", return_value=True):
+        with patch.object(host.launcher, "health", return_value=None), patch.object(host.launcher, "port_available", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "No local port"):
                 host.choose_port(self.root, 8765)
+
+    def test_cold_start_never_waits_for_refused_connections_on_unused_ports(self):
+        with patch.object(host.launcher, "port_available", return_value=True), \
+                patch.object(host.launcher, "health", side_effect=AssertionError("Unused ports must not make HTTP requests")), \
+                patch.object(host.launcher, "port_open", side_effect=AssertionError("Do not connect to unused ports")):
+            self.assertEqual(host.choose_port(self.root), (8765, True))
+
+    def test_only_occupied_ports_are_probed_and_probes_run_concurrently(self):
+        # Each probe must start before either can complete. A sequential scan
+        # fails this barrier instead of silently restoring a multi-second wait.
+        rendezvous = threading.Barrier(2, timeout=3)
+        calls = []
+
+        def health(port):
+            calls.append(port)
+            rendezvous.wait()
+            return {"data_directory": str(self.root)} if port == 8767 else None
+
+        with patch.object(host.launcher, "port_available", side_effect=lambda port: port not in (8766, 8767)), \
+                patch.object(host.launcher, "health", side_effect=health):
+            self.assertEqual(host.choose_port(self.root), (8767, False))
+        self.assertCountEqual(calls, [8766, 8767])
+
+    def test_saved_port_outside_default_range_is_reused(self):
+        (self.root / ".desktop-server.json").write_text(json.dumps({"port": 19000}))
+        with patch.object(host.launcher, "port_available", side_effect=lambda port: port != 19000), \
+                patch.object(host.launcher, "health", return_value={"data_directory":str(self.root)}) as probe:
+            self.assertEqual(host.choose_port(self.root), (19000, False))
+            probe.assert_called_once_with(19000)
 
     def test_start_emits_no_keys_and_leaves_reused_environment_untouched(self):
         with patch.object(host, "choose_port", return_value=(8765, False)), \
@@ -101,16 +130,15 @@ class DesktopHostTests(unittest.TestCase):
 
     def test_managed_server_reuses_without_ownership_and_stops_on_parent_exit(self):
         """Exercise the real native-app protocol, HTTP readiness and shutdown."""
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
         data = self.root / "Managed Workspace"
         empty_environment = self.root / "empty.env"
         empty_environment.write_text("")
         environment = {key:value for key,value in os.environ.items()
                        if not key.startswith(("ALPACA_", "FMP_", "PYTHON"))}
+        # Use the default port search, just as the Windows desktop does. This
+        # also covers avoiding another workspace and reusing our saved port.
         command = [sys.executable, "-B", str(Path(host.__file__).resolve()), "--managed", "--data-dir", str(data),
-                   "--env-file", str(empty_environment), "--port", str(port)]
+                   "--env-file", str(empty_environment)]
         with tempfile.TemporaryFile(mode="w+b") as errors:
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=errors, text=True, env=environment)
@@ -121,6 +149,8 @@ class DesktopHostTests(unittest.TestCase):
                 result = json.loads(ready.get(timeout=20))
                 self.assertTrue(result["owned_server"])
                 self.assertEqual(result["desktop_api"], 1)
+                port = urlsplit(result["url"]).port
+                self.assertIn(port, range(8765, 8796))
                 with urlopen("http://127.0.0.1:%d/api/health" % port, timeout=3) as response:
                     self.assertEqual(Path(json.load(response)["data_directory"]).resolve(), data)
                 with urlopen("http://127.0.0.1:%d/api/monitor" % port, timeout=3) as response:

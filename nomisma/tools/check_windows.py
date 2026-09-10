@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -25,6 +26,7 @@ import zipfile
 
 ARTIFACT_NAME = re.compile(r"Nomisma-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-win-x64-(setup\.exe|portable\.zip)")
 SMOKE_FLAGS = ("success", "owned_server", "page_loaded", "bridge_ready", "health_ok", "backend_stopped")
+STARTUP_TIMINGS = ("backend_ready_ms", "webview_ready_ms", "page_ready_ms")
 
 
 def verified_artifacts(directory: Path) -> tuple[Path, Path]:
@@ -105,12 +107,32 @@ def validate_smoke_result(result: dict, data_directory: Path) -> int:
         raise ValueError("The native application did not pass every startup and shutdown check.")
     if result.get("platform") != "windows" or not result.get("webview_version"):
         raise ValueError("The result does not identify a running Windows WebView2 application.")
+    timings = [result.get(field) for field in STARTUP_TIMINGS]
+    if any(type(value) is not int or value < 0 for value in timings):
+        raise ValueError("The native application did not report valid startup timing milestones.")
+    if timings != sorted(timings):
+        raise ValueError("The native application startup timing milestones are not ordered.")
     if Path(result.get("data_directory", "")).resolve() != data_directory.resolve():
         raise ValueError("The native application used an unexpected research directory.")
     parsed = urlsplit(result.get("url", ""))
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password or not parsed.port:
         raise ValueError("The native application reported an unexpected server address.")
     return parsed.port
+
+
+def retain_startup_logs(data_directory: Path, output: Path) -> list[str]:
+    """Retain only timing diagnostics, even if native verification failed."""
+    retained = []
+    for name in ("startup.log", "startup.log.previous"):
+        source = data_directory / name
+        try:
+            if source.is_file() and not source.is_symlink():
+                shutil.copyfile(source, output / name)
+                retained.append(name)
+        except OSError:
+            # Logging is best effort and must not hide a verification failure.
+            pass
+    return retained
 
 
 def wait_until(predicate, message: str, timeout: float = 15) -> None:
@@ -143,6 +165,7 @@ def check(artifacts: Path, output: Path) -> dict:
     installer, archive = verified_artifacts(artifacts)
     count = verify_archive(archive)
     output.mkdir(parents=True)
+    data_directory = output / "research data"
     report = {"success": False, "archive_files": count, "checksums_verified": True}
     marker = profile / "data/verification-research-marker.txt"
     marker_text = "Nomisma installer preservation check " + uuid.uuid4().hex
@@ -155,7 +178,6 @@ def check(artifacts: Path, output: Path) -> dict:
         report["installed"] = True
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(marker_text, encoding="utf-8")
-        data_directory = output / "research data"
         for label in ("first-launch", "second-launch"):
             result_file = output / (label + ".json")
             run_process([str(app), "--smoke-test", "--data-dir", str(data_directory),
@@ -182,6 +204,7 @@ def check(artifacts: Path, output: Path) -> dict:
         report["error"] = str(error)
         raise
     finally:
+        report["startup_logs"] = retain_startup_logs(data_directory, output)
         (output / "verification.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         if report["success"]:
             # Only remove the exact test marker and then empty directories.

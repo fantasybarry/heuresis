@@ -8,6 +8,7 @@ until its owning app closes stdin, then closes its monitor and HTTP server.
 
 import argparse
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import json
 import os
@@ -108,13 +109,21 @@ def choose_port(directory, preferred=None):
         except (OSError, ValueError, AttributeError):
             pass
         candidates.extend(range(8765, 8796))
-    free = []
+    free, occupied = [], []
     for port in dict.fromkeys(candidates):
-        status = launcher.health(port)
-        if _matches(status, directory):
-            return port, False
-        if status is None and not launcher.port_open(port):
+        if launcher.port_available(port):
             free.append(port)
+        else:
+            occupied.append(port)
+    # Never connect to unused ports: on Windows, even a loopback refusal can
+    # wait for the socket timeout. Check only occupied ports, concurrently, so
+    # unrelated local services cannot add one timeout per candidate in series.
+    if occupied:
+        with ThreadPoolExecutor(max_workers=min(8, len(occupied))) as probes:
+            statuses = probes.map(launcher.health, occupied)
+            for port, status in zip(occupied, statuses):
+                if _matches(status, directory):
+                    return port, False
     if not free:
         raise RuntimeError("No local port is available for this workspace. Close another local server and retry.")
     return free[0], True

@@ -11,18 +11,37 @@ import time
 import webbrowser
 from pathlib import Path
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 PROJECT = Path(__file__).resolve().parent
 
 
 def health(port):
     try:
-        with urlopen("http://127.0.0.1:%d/api/health" % port, timeout=1) as response:
+        # A loopback health check must never consult a system/corporate proxy.
+        with build_opener(ProxyHandler({})).open("http://127.0.0.1:%d/api/health" % port, timeout=1) as response:
             result = json.load(response)
         return result if isinstance(result, dict) and result.get("app") == "nomisma" and result.get("status") == "ok" else None
     except (OSError, URLError, ValueError):
         return None
+
+
+def port_available(port):
+    """Check a local bind without Windows' refused-connection timeout.
+
+    Windows needs exclusive binding here: SO_REUSEADDR can otherwise permit a
+    successful probe on a port already served by another application.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if os.name == "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
 
 
 def port_open(port):

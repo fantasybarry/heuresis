@@ -30,6 +30,7 @@ internal sealed class MainWindow : Form
     private readonly NotifyIcon notificationIcon;
     private readonly string preferenceFile;
     private readonly System.Windows.Forms.Timer smokeTimer = new() { Interval = 100000 };
+    private readonly SemaphoreSlim startupLogLock = new(1, 1);
     private Process? host;
     private HostReady? ready;
     private Uri? origin;
@@ -37,6 +38,9 @@ internal sealed class MainWindow : Form
     private string permission = "default";
     private string? latestNotification;
     private bool starting, closing, closed, smokeStarted, smokeFinished;
+    private Stopwatch? startupWatch;
+    private long? backendReadyMs, webviewReadyMs, pageReadyMs;
+    private bool startupTimingRecorded;
     internal int ExitCode { get; private set; }
 
     internal MainWindow(LaunchOptions options)
@@ -148,6 +152,9 @@ internal sealed class MainWindow : Form
     {
         if (starting || closing) return;
         starting = true;
+        startupWatch = Stopwatch.StartNew();
+        backendReadyMs = webviewReadyMs = pageReadyMs = null;
+        startupTimingRecorded = false;
         web.Visible = false;
         startup.Visible = true;
         startup.BringToFront();
@@ -187,6 +194,7 @@ internal sealed class MainWindow : Form
             if (ready.DesktopApi != 1 || !Uri.TryCreate(ready.Url, UriKind.Absolute, out var address) || address.Scheme != "http" || address.Host != "127.0.0.1" || address.Port < 1 || !Path.IsPathFullyQualified(ready.DataDirectory) || !Path.IsPathFullyQualified(ready.EnvFile))
                 throw new InvalidOperationException("The local service returned an invalid workspace address.");
             origin = new Uri(address.GetLeftPart(UriPartial.Authority));
+            backendReadyMs = startupWatch.ElapsedMilliseconds;
             if (closing) return;
             detail.Text = "Opening your market research window…";
             if (web.CoreWebView2 is null)
@@ -197,6 +205,7 @@ internal sealed class MainWindow : Form
                 ConfigureWebView();
             }
             var core = web.CoreWebView2 ?? throw new InvalidOperationException("The workspace browser could not initialize.");
+            webviewReadyMs = startupWatch.ElapsedMilliseconds;
             if (bridgeScriptId is not null) core.RemoveScriptToExecuteOnDocumentCreated(bridgeScriptId);
             using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Nomisma.Desktop.Bridge.js")!;
             using var reader = new StreamReader(stream);
@@ -266,6 +275,11 @@ internal sealed class MainWindow : Form
             web.Visible = true;
             startup.Visible = false;
             web.Focus();
+            if (!startupTimingRecorded)
+            {
+                pageReadyMs = startupWatch?.ElapsedMilliseconds;
+                RecordStartupTiming(success: true);
+            }
             if (options.SmokeTest && !smokeStarted)
             {
                 smokeStarted = true;
@@ -378,6 +392,7 @@ internal sealed class MainWindow : Form
     private void ShowError(string title, string message, bool webViewMissing = false)
     {
         if (closing) return;
+        RecordStartupTiming(success: false);
         web.Visible = false;
         startup.Visible = true;
         startup.BringToFront();
@@ -386,6 +401,44 @@ internal sealed class MainWindow : Form
         progress.Visible = false;
         retry.Visible = true;
         installWebView.Visible = webViewMissing;
+    }
+
+    private void RecordStartupTiming(bool success)
+    {
+        if (startupWatch is null || startupTimingRecorded) return;
+        startupTimingRecorded = true;
+        startupWatch.Stop();
+        // Milestones are cumulative milliseconds from this opening attempt.
+        // Keep diagnostics limited to app metadata and durations: never include
+        // the workspace path, provider response, environment, or error text.
+        string record = JsonSerializer.Serialize(new
+        {
+            timestamp = DateTimeOffset.UtcNow.ToString("O"),
+            version = Application.ProductVersion.Split('+')[0],
+            success,
+            elapsed_ms = startupWatch.ElapsedMilliseconds,
+            backend_ready_ms = backendReadyMs,
+            webview_ready_ms = webviewReadyMs,
+            page_ready_ms = pageReadyMs,
+        });
+        string directory = ready?.DataDirectory ?? options.DataDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nomisma", "data");
+        _ = WriteStartupTimingAsync(directory, record);
+    }
+
+    private async Task WriteStartupTimingAsync(string directory, string record)
+    {
+        await startupLogLock.WaitAsync();
+        try
+        {
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, "startup.log");
+            const long maximumBytes = 256 * 1024;
+            if (File.Exists(path) && new FileInfo(path).Length + System.Text.Encoding.UTF8.GetByteCount(record) + 2 > maximumBytes)
+                File.Move(path, path + ".previous", true);
+            await File.AppendAllTextAsync(path, record + Environment.NewLine);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        finally { startupLogLock.Release(); }
     }
 
     private async Task StopHostAsync()
@@ -432,6 +485,7 @@ internal sealed class MainWindow : Form
         args.Cancel = true;
         if (closing) return;
         closing = true;
+        RecordStartupTiming(success: false);
         smokeTimer.Stop();
         Enabled = false;
         status.Text = "Closing the local service…";
@@ -488,7 +542,7 @@ internal sealed class MainWindow : Form
         ExitCode = success ? 0 : 1;
         try
         {
-            Program.WriteResult(options.ResultFile, new { success, error, platform = "windows", url = ready?.Url, data_directory = ready?.DataDirectory, owned_server = ready?.OwnedServer ?? false, webview_version = webViewVersion, page_loaded = success, bridge_ready = success, health_ok = success, backend_stopped = stopped });
+            Program.WriteResult(options.ResultFile, new { success, error, platform = "windows", url = ready?.Url, data_directory = ready?.DataDirectory, owned_server = ready?.OwnedServer ?? false, webview_version = webViewVersion, page_loaded = success, bridge_ready = success, health_ok = success, backend_stopped = stopped, backend_ready_ms = backendReadyMs, webview_ready_ms = webviewReadyMs, page_ready_ms = pageReadyMs });
         }
         catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { ExitCode = 1; }
         Close();

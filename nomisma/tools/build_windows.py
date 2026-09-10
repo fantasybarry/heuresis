@@ -347,7 +347,7 @@ def build(args: argparse.Namespace) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=PROJECT / "dist/windows")
-    parser.add_argument("--version", type=validate_version, default="1.0.0")
+    parser.add_argument("--version", type=validate_version, default="1.0.1")
     parser.add_argument("--dotnet", help="Path to the .NET 10 SDK dotnet executable")
     parser.add_argument("--makensis", help="Path to the NSIS makensis executable")
     args = parser.parse_args()
