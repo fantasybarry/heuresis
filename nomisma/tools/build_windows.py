@@ -293,12 +293,28 @@ def build(args: argparse.Namespace) -> list[Path]:
     with tempfile.TemporaryDirectory(prefix=".nomisma-windows-", dir=output) as directory:
         work = Path(directory)
         application = work / "Nomisma"
+        # The native Windows SDK supplies apphost from its installed packs,
+        # omitting that package from project.assets.json (and its licenses from
+        # NuGet's cache). Resolve all packs through NuGet on every build host so
+        # preserve_licenses can use the exact versions we actually distribute.
+        packs = work / "sdk-packs"
+        packs.mkdir()
         env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTHON", "DYLD_"))}
         env["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"
         env["DOTNET_NOLOGO"] = "1"
+        # .NET 10 still needs the installed reference-pack metadata for NuGet
+        # pruning, even when binary packs are restored independently below.
+        sdk_packs = subprocess.run(
+            [dotnet, "msbuild", str(PROJECT / "desktop/windows/Nomisma.Windows.csproj"),
+             "-nologo", "-getProperty:NetCoreTargetingPackRoot"],
+            check=True, capture_output=True, text=True, env=env).stdout.strip()
+        if not sdk_packs or not Path(sdk_packs).is_dir():
+            raise RuntimeError("Could not locate the .NET SDK reference-pack metadata.")
         run(dotnet, "publish", PROJECT / "desktop/windows/Nomisma.Windows.csproj",
             "-c", "Release", "-r", "win-x64", "--self-contained", "true",
             "-p:EnableWindowsTargeting=true", "-p:RestoreLockedMode=true", "-p:PublishReadyToRun=false",
+            f"-p:NetCoreTargetingPackRoot={packs}",
+            f"-p:PrunePackageTargetingPackRoots={sdk_packs}",
             "-p:DebugType=None", "-p:DebugSymbols=false", f"-p:Version={args.version}",
             "-o", application, env=env)
         resources = application / "resources"
