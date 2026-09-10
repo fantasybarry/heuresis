@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from nomisma.monitor import LiveMonitor, MonitorBusy, monitor_csv, timestamp
-from nomisma.monitor_metrics import demo_bundle
+from nomisma.monitor_metrics import build_rows, demo_bundle
 from nomisma.server import Application, make_handler
 from nomisma.storage import Store
 
@@ -100,6 +100,17 @@ class MonitorTests(unittest.TestCase):
         another._evaluate_alerts([self.row(1), self.row(2)], another.config)
         self.assertEqual(len(self.store.monitor_alerts()), 1)
         self.assertFalse(another.snapshot()["status"]["running"])
+
+    def test_legacy_tracker_migrates_only_to_saved_alert_feed(self):
+        self.evaluate(0)
+        self.evaluate(1)
+        state = self.store.get("monitor_alert_tracker")["demo:synthetic:DEMO:2026-09-08"]
+        self.store.set("monitor_alert_tracker", {"demo:DEMO:2026-09-08": state})
+        another = LiveMonitor(self.store)
+        another._evaluate_alerts([self.row(2)], another.config)
+        self.assertEqual(self.store.monitor_alerts_total(), 1)
+        self.assertIn("demo:synthetic:DEMO:2026-09-08", another.tracker)
+        self.assertNotIn("demo:iex:DEMO:2026-09-08", another.tracker)
 
     def test_alert_acknowledgment_persists(self):
         self.evaluate(0)
@@ -282,6 +293,84 @@ class MonitorTests(unittest.TestCase):
         content = monitor_csv({"rows": [row]}).decode("utf-8-sig")
         self.assertIn("'=BAD()", content)
         self.assertIn("demo,synthetic", content)
+
+    def journal_alert(self):
+        self.monitor.config.update(confirmation_bars=1, min_relative_volume=0)
+        self.monitor.bundle = demo_bundle(["DEMO"], step=10)
+        row = build_rows(self.monitor.bundle, self.monitor.config, now=self.monitor.bundle["as_of"])[0]
+        self.assertTrue(row["alert_eligible"])
+        self.monitor._evaluate_alerts([row], self.monitor.config)
+        identifier = self.store.monitor_alerts()[0]["id"]
+        return self.store.monitor_alert(identifier), row
+
+    def test_alert_evidence_is_frozen_and_list_omits_heavy_evidence(self):
+        alert, row = self.journal_alert()
+        self.assertTrue(alert["snapshot"]["confirmation"]["confirmed"])
+        self.assertEqual(alert["schema_version"], 1)
+        self.assertNotIn("snapshot", self.store.monitor_alerts()[0])
+        row["chart"][0]["close"] = 999
+        self.monitor.config["min_price"] = 99
+        saved = self.store.monitor_alert(alert["id"])
+        self.assertEqual(saved["snapshot"], alert["snapshot"])
+        self.assertEqual(saved["config"], alert["config"])
+        restored = Store(tempfile.mkdtemp(dir=self.temp.name))
+        restored.restore_backup(self.store.backup())
+        self.assertEqual(restored.monitor_alert(alert["id"]), saved)
+
+    def test_outcomes_use_complete_future_window_and_signal_close(self):
+        alert, row = self.journal_alert()
+        self.monitor.bundle = demo_bundle(["DEMO"], step=15)
+        future = self.monitor.bundle["assets"][0]["minutes"]
+        future[49]["low"] = alert["reference_price"] * .5  # signal bar is outside future window
+        future[52]["low"] = alert["reference_price"] * .9
+        self.monitor.refresh_outcomes()
+        detail = self.monitor.alert_detail(alert["id"])
+        observed = detail["outcomes"]["5"]
+        self.assertEqual(observed["status"], "observed")
+        self.assertAlmostEqual(observed["adverse_excursion_pct"], -10)
+        self.assertAlmostEqual(observed["close_change_pct"], (future[54]["close"] / alert["reference_price"] - 1) * 100)
+        self.assertEqual(detail["outcomes"]["15"]["status"], "pending")
+        self.assertEqual(detail["snapshot"], alert["snapshot"])
+
+    def test_outcomes_ignore_future_data_until_it_is_completed(self):
+        alert, row = self.journal_alert()
+        bundle = demo_bundle(["DEMO"], step=40)
+        bundle["as_of"] = demo_bundle(["DEMO"], step=11)["as_of"]
+        outcomes = self.monitor._observations(alert, bundle)
+        self.assertEqual(outcomes["5"]["status"], "pending")
+        self.assertIsNone(outcomes["5"]["close_change_pct"])
+
+    def test_outcome_gap_can_repair_but_feed_and_session_cannot_mix(self):
+        alert, row = self.journal_alert()
+        bundle = demo_bundle(["DEMO"], step=40)
+        original = copy.deepcopy(bundle)
+        bundle["assets"][0]["minutes"].pop(52)
+        self.assertEqual(self.monitor._observations(alert, bundle)["5"]["status"], "unavailable")
+        self.assertEqual(self.monitor._observations(alert, original)["5"]["status"], "observed")
+        original["feed"] = "iex"
+        self.assertNotEqual(self.monitor._observations(alert, original)["5"]["status"], "observed")
+        original["feed"] = "synthetic"
+        original["session"]["date"] = "2025-05-15"
+        self.assertNotEqual(self.monitor._observations(alert, original)["5"]["status"], "observed")
+
+    def test_outcomes_past_session_close_and_legacy_alerts_are_unavailable(self):
+        alert, row = self.journal_alert()
+        alert["session"]["close"] = (timestamp(alert["reference_at"]) + timedelta(minutes=10)).isoformat()
+        self.assertEqual(self.monitor._observations(alert, self.monitor.bundle)["15"]["status"], "unavailable")
+        legacy = dict(alert)
+        legacy.pop("reference_price")
+        self.assertEqual(self.monitor._observations(legacy, self.monitor.bundle)["5"]["status"], "unavailable")
+
+    def test_optional_channel_evidence_and_status_events_are_retained(self):
+        bundle, now = self.prepare_stream()
+        event = {"T": "nomisma_subscription", "required": True, "statuses": True, "lulds": False,
+                 "checked_at": now.isoformat(), "message": "Optional channel status"}
+        self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+        self.assertTrue(self.monitor.status["channel_subscriptions"]["statuses"])
+        with patch("nomisma.monitor.utcnow", return_value=now):
+            self.monitor._on_event({"T": "s", "S": "DEMO", "t": now.isoformat(), "sc": "H", "sm": "Halted"},
+                                   self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+        self.assertEqual(bundle["assets"][0]["snapshot"]["tradingStatus"]["sc"], "H")
 
 
 class MonitorHTTPTests(unittest.TestCase):

@@ -3269,3 +3269,15 @@ h1>span {
     background:#fff
   }
 }
+
+.history-page-actions { display:flex; gap:8px; }
+.history-page-actions .button { min-height:32px; font-size:11px; padding:7px 12px; }
+#history-error { margin:0 22px 16px; }
+.workspace-data .form-description { margin-bottom:15px; line-height:1.8; }
+.workspace-data details { margin-top:18px; padding-top:17px; border-top:1px solid #e6ecde; }
+.workspace-data summary { font-size:12px; cursor:pointer; margin-bottom:15px; }
+.workspace-data .check-option { margin:16px 0; align-items:flex-start; }
+.workspace-data .check-option span { line-height:1.7; }
+.workspace-data .check-option input { margin-top:3px; }
+.workspace-data input[type=file] { padding:10px; font-size:11px; max-width:100%; }
+#workspace-data-status { margin-top:14px; overflow-wrap:anywhere; line-height:1.8; }

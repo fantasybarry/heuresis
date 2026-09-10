@@ -105,3 +105,18 @@ Filters run on unrounded indicator values, apart from the deliberately rounded s
 ## Interpretation limits
 
 Strong trend, momentum, and volume can reverse. Indicators overlap and are not independent confirmations. Current listing universes omit delisted stocks, and adjusted data may be revised, so future strategy testing must explicitly address survivorship bias and point-in-time data. A credible probability model would also require a defined holding period/target, out-of-sample testing, transaction costs, and ongoing calibration. Daily histories alone do not account for earnings, news, liquidity at execution, or personal suitability.
+
+
+## Preserved alert evidence and observed outcomes
+
+New monitor alerts freeze the complete original row, its completed minute chart, filter configuration, confirmation state, and session metadata. The alert schema version is recorded. Later data changes do not rewrite this evidence; legacy alerts without an original snapshot remain explicitly unavailable.
+
+The reference for journal outcomes is the **completed signal minute's close**, not the latest displayed trade or an assumed fill. If the signal minute starts at 10:17 and ends at 10:18, its 5-minute observation covers exactly 10:18–10:23, using all five completed bars. The 15- and 30-minute windows follow the same convention.
+
+Close change (%) = 100 × (last completed window close / reference close − 1).
+
+Adverse excursion (%) = min(0, 100 × (minimum low across the complete window / reference close − 1)).
+
+Observations require exact symbol, source, feed, and session identity, positive prices, and contiguous completed future minutes. Future-dated bars are excluded. Missing minutes make a due observation unavailable until repaired; a window extending beyond the exchange close is unavailable. Historical observations remain saved after changing the monitor's session or symbols. Corrections can revise observed outcomes while leaving the original alert intact. No execution, spread, commissions, slippage, or portfolio returns are simulated.
+
+Current-session trading-status messages, when subscribed and received, distinguish halted/paused states from full trading resumption. Missing or unknown status is labeled unavailable and never interpreted as proof of uninterrupted trading. Explicit halts suppress alerts. Limit-price bands retain their provider timestamp and availability independently of setup scoring.

@@ -163,7 +163,7 @@ def check_live(client, app, server_port, output, temporary):
 
     client.evaluate("document.querySelector('#live-table [data-live-symbol]').click()")
     client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-data svg')")
-    assert client.evaluate("document.querySelectorAll('.live-history-table tbody tr').length === 30")
+    assert client.evaluate("document.querySelectorAll('#live-history-details .live-history-table tbody tr').length === 30")
     assert client.evaluate("['Session volume','Float shares','30-session average volume','30-session total volume','Session relative volume','1-minute relative volume','Opening gap'].every(label => document.querySelector('#live-report-data').textContent.includes(label))")
     assert client.evaluate("document.querySelector('#live-float-edit').classList.contains('hidden')")
     client.screenshot(output / "intraday-stock-report.png")

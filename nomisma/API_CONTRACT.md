@@ -1,6 +1,6 @@
 # Nomisma implementation contract
 
-Local Python 3.9+ standard-library app. No runtime packages required. UI is vanilla HTML/CSS/JS served from `nomisma/static/`. All paths below are relative to `projects/nomisma/`. This file documents the internal API, not investment methodology.
+Local Python 3.9+ standard-library app. No runtime packages required. UI is vanilla HTML/CSS/JS served from `nomisma/static/`. All paths below are relative to `nomisma/` in the Heuresis repository. This file documents the internal API, not investment methodology.
 
 ## Engine (`nomisma/engine.py`)
 
@@ -18,7 +18,7 @@ Expose `provider_status() -> {alpaca_configured:bool,feed:str}`, `demo_dataset()
 
 ## Server API (root implements)
 
-Run with `python3 projects/nomisma/run.py` (default localhost:8765). Optional `--port`, `--scan`, `--data-dir`. SQLite state under ignored `projects/nomisma/data/`. Server loads project `.env` if present without overriding existing environment.
+Run with `python3 run.py` (default localhost:8765). Optional `--port`, `--scan`, `--data-dir`. SQLite state under ignored `data/`. Server loads project `.env` if present without overriding existing environment.
 
 GET `/api/bootstrap`: `{settings:{filters,source,universe,symbols,schedule:{enabled,time,timezone}},presets:[{id,name,description,filters}],watchlist:[symbol],latest:scan|null,history:[{id,created_at,source,as_of,matched_count}],job:{running,message,error,scan_id},provider_status:{alpaca_configured,feed,csv_available}}`.
 
@@ -36,7 +36,17 @@ POST `/api/import`: `{csv:string}` validates and stores CSV dataset; returns `{a
 
 GET `/api/export.csv?scan=<id>` returns current matching results, CSV escaped and formula-safe.
 
-Errors JSON `{error:string}`. Unknown endpoints 404. UI should show error, loading and empty states. No data/keys via static handler. Mutations accept application/json only and reject foreign Origin; server bound to loopback.
+Errors JSON `{error:string}`. Unknown endpoints 404. UI should show error, loading and empty states. No data/keys via static handler. Mutations accept application/json except the binary restore route, and reject foreign Origin; server bound to loopback.
+
+## Research and workspace extensions
+
+- GET `/api/health`: `{app:'nomisma',status:'ok',version:'2',data_directory}`. The launcher verifies both app identity and data directory before reusing a server.
+- POST `/api/diagnostics`: `{}`. Tests the saved monitor configuration. POST `/api/discovery`: `{source,universe,symbols,min_price,max_price,min_day_volume,min_change_pct,limit}`. Both return HTTP 202 `{job:{id,kind,running,message,error,result}}`.
+- GET `/api/research/jobs/<id>` returns the same job envelope. One research action runs at a time. At most 32 recent jobs are retained in memory. Restart clears them. A monitor start is refused while a diagnostic is running to avoid competing stream connections.
+- Discovery result contains source/feed, request/completion/market timestamps, session date and market phase, universe label, requested/received/current-session/matched/returned/missing/stale/invalid counts, candidate rows, filters, and warnings. Rows carry symbol/name, latest price, day change, feed-day volume, timestamps, trade age, and freshness. Real discovery requires current-session trade/daily dates and the exact previous-session close date. Regular-session trades older than five minutes are excluded. Outside regular hours any retained stale row remains labeled stale.
+- GET `/api/history?limit=20&offset=0`: `{history,total,limit,offset}`. GET `/api/monitor/alerts?limit=20&offset=0`: `{alerts,total,limit,offset}`. HTTP pagination accepts limits 1–100 and offsets 0–10000000.
+- GET `/api/monitor/alerts/<id>` returns original alert evidence and observed outcomes, with legacy evidence explicitly unavailable. List and monitor SSE results omit the large original config/snapshot/session fields.
+- GET `/api/workspace/backup` downloads a consistent SQLite snapshot. POST `/api/workspace/restore` accepts a raw `application/octet-stream` or `application/vnd.sqlite3` body, maximum 128 MB. The monitor, daily scan, and research jobs must be stopped/finished. The app validates the upload and preserves an automatic local safety backup before restoring validated table rows. Returns `{restored:true,backup_path}`. Restored monitor remains stopped; reload UI to reflect restored settings.
 
 ## UI (frontend agent owns static files)
 

@@ -1,6 +1,8 @@
 import copy
+from contextlib import closing
 import http.client
 import json
+import sqlite3
 import tempfile
 import threading
 import time
@@ -134,6 +136,71 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn("demo,synthetic", content)
         self.assertIn("-1.5", content)
 
+    def test_restore_preserves_recovery_copy_and_reloads_stopped_monitor(self):
+        self.app.store.set_watch("AAPL", True)
+        self.app.monitor.save_config({"symbols": ["SAVED"]})
+        backup = self.app.store.backup()
+        self.app.store.set_watch("AAPL", False)
+        self.app.monitor.save_config({"symbols": ["CURRENT"]})
+        old_monitor = self.app.monitor
+        result = self.app.restore_workspace(backup)
+        self.assertTrue(result["restored"])
+        self.assertEqual(self.app.store.watchlist(), ["AAPL"])
+        self.assertEqual(self.app.monitor.config["symbols"], ["SAVED"])
+        self.assertIsNot(self.app.monitor, old_monitor)
+        self.assertFalse(self.app.monitor.status["running"])
+        self.assertTrue(old_monitor.stop_event.is_set())
+        with closing(sqlite3.connect(result["backup_path"])) as recovery:
+            config = json.loads(recovery.execute("SELECT value FROM state WHERE key='monitor_config'").fetchone()[0])
+            self.assertEqual(config["symbols"], ["CURRENT"])
+
+    def test_restore_refuses_active_work(self):
+        for kind in ("scan", "monitor", "research"):
+            with self.subTest(kind=kind):
+                self.app.job["running"] = kind == "scan"
+                self.app.monitor.status["running"] = kind == "monitor"
+                self.app.research_jobs = {"x": {"running": True}} if kind == "research" else {}
+                with self.assertRaises(BusyError):
+                    self.app.restore_workspace(b"not read while busy")
+        self.app.job["running"] = False
+        self.app.monitor.status["running"] = False
+        self.app.research_jobs = {}
+
+    def test_failed_schedule_remains_busy_until_retry_state_is_saved(self):
+        self.app.job["running"] = True
+        original_set = self.app.store.set
+        def save_retry(key, value):
+            if key == "schedule_retry_after":
+                self.assertTrue(self.app.job["running"])
+                with self.assertRaises(BusyError):
+                    self.app.restore_workspace(b"not read while busy")
+            return original_set(key, value)
+        with patch.object(self.app, "run_scan", side_effect=RuntimeError("Provider unavailable")), \
+                patch.object(self.app.store, "set", side_effect=save_retry):
+            self.app._worker(default_settings(), "2026-09-09")
+        self.assertFalse(self.app.job["running"])
+
+    def test_discovery_job_completes_and_remains_available_for_polling(self):
+        complete = threading.Event()
+        release = threading.Event()
+        def discovery(*args, **kwargs):
+            complete.set()
+            release.wait(2)
+            return {"source": "demo", "rows": []}
+        with patch("nomisma.research.discover", side_effect=discovery):
+            job = self.app.start_research("discovery", {"source": "demo"})
+            self.assertTrue(complete.wait(2))
+            with self.assertRaises(BusyError):
+                self.app.start_research("diagnostics", {})
+            release.set()
+            for _ in range(100):
+                result = self.app.research_status(job["id"])
+                if not result["running"]:
+                    break
+                time.sleep(.01)
+            self.assertFalse(result["running"])
+            self.assertEqual(result["result"], {"source": "demo", "rows": []})
+
 
 class HTTPTests(unittest.TestCase):
     @classmethod
@@ -169,6 +236,63 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("settings", body)
         self.assertIn("Content-Security-Policy", headers)
+
+    def test_health_identifies_the_workspace(self):
+        status, body, _ = self.request("/api/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["app"], "nomisma")
+        self.assertEqual(body["data_directory"], str(self.app.store.directory))
+
+    def test_paginated_history_and_alerts_validate_offsets(self):
+        for route, field in (("/api/history", "history"), ("/api/monitor/alerts", "alerts")):
+            status, body, _ = self.request(route + "?limit=2&offset=1")
+            self.assertEqual(status, 200)
+            self.assertIn(field, body)
+            self.assertEqual(body["offset"], 1)
+            for query in ("limit=0", "limit=101", "offset=-1", "offset=abc"):
+                self.assertEqual(self.request(route + "?" + query)[0], 400)
+
+    def test_research_routes_dispatch_and_poll(self):
+        job = {"id": "sample", "kind": "discovery", "running": True, "message": "Searching", "error": None, "result": None}
+        with patch.object(self.app, "start_research", return_value=job) as dispatch:
+            status, body, _ = self.request("/api/discovery", {"source": "demo"})
+            self.assertEqual(status, 202)
+            self.assertEqual(body["job"], job)
+            dispatch.assert_called_once_with("discovery", {"source": "demo"})
+        with patch.object(self.app, "research_status", return_value=job):
+            self.assertEqual(self.request("/api/research/jobs/sample")[1]["job"], job)
+        self.assertEqual(self.request("/api/research/jobs/missing")[0], 404)
+        self.assertEqual(self.request("/api/monitor/alerts/missing")[0], 404)
+
+    def test_backup_download_and_restore_require_local_origin(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request("GET", "/api/workspace/backup")
+            response = connection.getresponse()
+            backup = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(backup.startswith(b"SQLite format 3"))
+            self.assertIn("attachment", response.getheader("Content-Disposition"))
+            connection.request("POST", "/api/workspace/restore", backup,
+                               {"Content-Type": "application/octet-stream", "Origin": "https://example.com"})
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 403)
+        finally:
+            connection.close()
+
+    def test_invalid_restore_leaves_workspace_unchanged(self):
+        self.app.store.set_watch("KEEP", True)
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request("POST", "/api/workspace/restore", b"not sqlite", {"Content-Type": "application/octet-stream"})
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 400)
+            self.assertIn("KEEP", self.app.store.watchlist())
+        finally:
+            self.app.store.set_watch("KEEP", False)
+            connection.close()
 
     def test_unknown_and_private_paths_are_not_exposed(self):
         for path in ("/api/missing", "/.env", "/../storage.py", "/data/nomisma.sqlite3", "/api/scans/missing"):

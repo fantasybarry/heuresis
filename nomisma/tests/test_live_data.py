@@ -386,7 +386,11 @@ class StreamTests(unittest.TestCase):
         with patch.object(live, "_WebSocket", return_value=fake):
             live.stream_live(["ABCD"], receive, stop, statuses.append)
         self.assertEqual(statuses, ["connecting", "live"])
-        self.assertEqual(received, events)
+        self.assertEqual([event for event in received if event["T"] != "nomisma_subscription"], events)
+        subscription = next(event for event in received if event["T"] == "nomisma_subscription")
+        self.assertTrue(subscription["required"])
+        self.assertFalse(subscription["statuses"])
+        self.assertFalse(subscription["lulds"])
         self.assertEqual(fake.send_json.call_args_list[0][0][0]["action"], "auth")
         self.assertEqual(fake.send_json.call_args_list[1][0][0]["updatedBars"], ["ABCD"])
         fake.close.assert_called_once()
@@ -414,6 +418,54 @@ class StreamTests(unittest.TestCase):
             live.stream_live(["ABCD"], lambda event: None, threading.Event())
         self.assertIn("authentication failed", str(caught.exception))
         self.assertNotIn("private-secret", str(caught.exception))
+
+    @patch.dict(os.environ, ENV, clear=True)
+    def test_optional_channel_denial_preserves_price_stream_and_checks_other_channel(self):
+        stop = threading.Event()
+        fake = MagicMock()
+        accepted = dict(self.acknowledgment(), statuses=[], lulds=["ABCD"])
+        fake.message.side_effect = [[{"T": "success", "msg": "authenticated"}], [self.acknowledgment()],
+                                    [{"T": "error", "code": 410, "msg": "private-secret"}], [accepted],
+                                    [{"T": "t", "S": "ABCD", "p": 2.1}]]
+        received = []
+
+        def receive(event):
+            received.append(event)
+            if event["T"] == "t":
+                stop.set()
+
+        with patch.object(live, "_WebSocket", return_value=fake):
+            live.stream_live(["ABCD"], receive, stop)
+        self.assertEqual(fake.send_json.call_args_list[2][0][0], {"action": "subscribe", "statuses": ["ABCD"]})
+        self.assertEqual(fake.send_json.call_args_list[3][0][0], {"action": "subscribe", "lulds": ["ABCD"]})
+        channels = [event for event in received if event["T"] == "nomisma_subscription"][-1]
+        self.assertFalse(channels["statuses"])
+        self.assertTrue(channels["lulds"])
+        self.assertNotIn("private-secret", str(received))
+        self.assertEqual(received[-1]["T"], "t")
+        fake.close.assert_called_once()
+
+    @patch.dict(os.environ, ENV, clear=True)
+    def test_optional_acknowledgments_and_halt_events_are_forwarded(self):
+        stop = threading.Event()
+        fake = MagicMock()
+        halt = {"T": "s", "S": "ABCD", "sc": "H", "t": NOW.isoformat()}
+        fake.message.side_effect = [[{"T": "success", "msg": "authenticated"}], [self.acknowledgment()],
+                                    [dict(self.acknowledgment(), statuses=["ABCD"])],
+                                    [dict(self.acknowledgment(), statuses=["ABCD"], lulds=["ABCD"])], [halt]]
+        received = []
+
+        def receive(event):
+            received.append(event)
+            if event["T"] == "s":
+                stop.set()
+
+        with patch.object(live, "_WebSocket", return_value=fake):
+            live.stream_live(["ABCD"], receive, stop)
+        channels = [event for event in received if event["T"] == "nomisma_subscription"][-1]
+        self.assertTrue(channels["statuses"])
+        self.assertTrue(channels["lulds"])
+        self.assertEqual(received[-1], halt)
 
     @patch.dict(os.environ, ENV, clear=True)
     def test_stop_before_stream_does_not_connect(self):

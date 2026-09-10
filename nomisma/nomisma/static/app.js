@@ -67,7 +67,8 @@ const state = {
   provider:{}, job:{running:false}, view:"live", query:"", sort:"score", page:0,
   pageSize:20, pollTimer:null, polling:false, lastJobError:null, scans:new Map(),
   detail:null, detailScan:null, detailRange:60, historyScan:null, historyPage:0,
-  textSubmit:null, importBusy:false, scanSubmitting:false, lastFocus:new WeakMap()
+  textSubmit:null, importBusy:false, scanSubmitting:false, lastFocus:new WeakMap(),
+  historyOffset:0, historyTotal:0, historyBusy:false, workspaceBusy:false
 };
 
 async function api(path, body) {
@@ -270,8 +271,24 @@ function renderWatchlist() {
     return `<article class="watch-card"><div class="watch-card-top"><div class="watch-card-name">${avatar(symbol)}${escapeHTML(symbol)}</div><button class="icon-button" data-watch="${escapeHTML(symbol)}" aria-label="Remove ${escapeHTML(symbol)} from watchlist">${icon("close")}</button></div>${stock ? `<div class="watch-price">${money(stock.price)}<small class="${changeClass(stock.change_pct)}">${percent(stock.change_pct)}</small></div><p>${escapeHTML(stock.name)}<br>Data as of ${dateLabel(stock.as_of)} · ${escapeHTML(sourceName(state.latest.source))}</p><div class="watch-card-foot"><span class="setup-badge">Score ${number(stock.score)} / 100</span><button class="text-button" data-stock="${escapeHTML(symbol)}" data-scan="${escapeHTML(state.latest.id)}">View signals ${icon("arrow-right")}</button></div>` : `<p>No matching result in the latest scan. This symbol may fall outside the scanned universe or your selected filters.</p><div class="watch-card-foot"><span class="source-tag">Saved for research</span><button class="text-button" data-action="settings">Edit universe ${icon("arrow-right")}</button></div>`}</article>`;
   }).join("")}</div>`;
 }
+async function loadHistory(offset = 0) {
+  if (state.historyBusy) return;
+  state.historyBusy = true;
+  showError("#history-error", "");
+  renderHistory();
+  try {
+    const result = await api(`/api/history?limit=${state.pageSize}&offset=${Math.max(0, offset)}`);
+    state.history = result.history || [];
+    state.historyTotal = result.total;
+    state.historyOffset = result.offset;
+  } catch (error) { showError("#history-error", error.message); }
+  finally { state.historyBusy = false; renderHistory(); }
+}
 function renderHistory() {
-  $("#history-count").textContent = `${state.history.length} ${state.history.length === 1 ? "scan" : "scans"}`;
+  $("#history-count").textContent = `${number(state.historyTotal)} ${state.historyTotal === 1 ? "scan" : "scans"}`;
+  $("#history-page-label").textContent = state.historyBusy ? "Loading history…" : state.historyTotal ? `${state.historyOffset+1}–${Math.min(state.historyOffset+state.history.length, state.historyTotal)} of ${number(state.historyTotal)} scans` : "No saved scans";
+  $("#history-previous").disabled = state.historyBusy || state.historyOffset === 0;
+  $("#history-next").disabled = state.historyBusy || state.historyOffset + state.pageSize >= state.historyTotal;
   if (!state.history.length) {
     $("#history-results").innerHTML = emptyState("history", "Your research starts here", "Completed scans appear here with their original data date, filters, and ranked results.");
     return;
@@ -302,6 +319,7 @@ function changeView(view, updateHash = true) {
   };
   if (!metadata[view]) view = "live";
   state.view = view;
+  if (view === "history") loadHistory(state.historyOffset);
   $$(".view-panel").forEach((panel) => panel.classList.toggle("hidden", panel.id !== `${view}-view`));
   $$("[data-view]").forEach((button) => {
     const active = button.dataset.view === view;
@@ -346,7 +364,7 @@ async function pollStatus() {
     const result = await api(`/api/status${state.latest?.id ? `?since=${encodeURIComponent(state.latest.id)}` : ""}`);
     const changed = Boolean(result.latest && result.latest.id !== state.latest?.id);
     if (result.latest) state.latest = result.latest;
-    state.history = result.history || [];
+    if (changed) await loadHistory(state.historyOffset);
     applyJob(result.job);
     if (changed) {
       state.page = 0;
@@ -455,6 +473,7 @@ function savePreset() {
 
 function updateSourceControls() {
   const source = $("#settings-source").value;
+  const configurationLocation = window.nomismaDesktop?.configFile ? `<code>${escapeHTML(window.nomismaDesktop.configFile)}</code> (${window.nomismaDesktop.platform === "windows" ? "File" : "Nomisma"} menu → Open Configuration Folder)` : '<code>.env</code> in the Nomisma folder';
   $("#provider-controls").classList.remove("hidden");
   const universeSelect = $("#settings-universe");
   const allDescription = source === "alpaca" ? "All active US exchange-listed equities" : source === "csv" ? "All symbols in your imported CSV" : "All symbols in the synthetic demo";
@@ -464,7 +483,7 @@ function updateSourceControls() {
   $("#custom-symbols-field").classList.toggle("hidden", $("#settings-universe").value !== "custom");
   const help = {
     demo:'<p><strong>A place to explore.</strong> Demo mode uses synthetic prices with a fixed historical data date. It demonstrates screening and scoring, but does not describe today’s market.</p>',
-    alpaca:state.provider.alpaca_configured ? `<p><strong>Alpaca is configured.</strong> Your server uses the ${escapeHTML(String(state.provider.feed || "iex").toUpperCase())} feed and completed daily sessions.</p>${state.provider.feed === "iex" ? '<p>IEX volume is exchange-specific. Volume and liquidity filters can behave differently from consolidated market data.</p>' : ""}<p>The full exchange-listed universe can take several minutes. Failed requests are reported and can be retried.</p>` : '<p><strong>Connect Alpaca on your server.</strong> Add your credentials to <code>projects/nomisma/.env</code>, then restart Nomisma and reload this page.</p><pre>ALPACA_API_KEY=your_key\nALPACA_SECRET_KEY=your_secret\nALPACA_FEED=iex\nALPACA_PAPER=true</pre><p>Use <code>ALPACA_PAPER=false</code> for live-account credentials. Credentials stay on your server. IEX data covers one exchange; consolidated SIP data requires the appropriate provider subscription.</p>',
+    alpaca:state.provider.alpaca_configured ? `<p><strong>Alpaca is configured.</strong> Your server uses the ${escapeHTML(String(state.provider.feed || "iex").toUpperCase())} feed and completed daily sessions.</p>${state.provider.feed === "iex" ? '<p>IEX volume is exchange-specific. Volume and liquidity filters can behave differently from consolidated market data.</p>' : ""}<p>The full exchange-listed universe can take several minutes. Failed requests are reported and can be retried.</p>` : `<p><strong>Connect Alpaca on your server.</strong> Add your credentials to ${configurationLocation}, then restart the local server and reload this workspace.</p><pre>ALPACA_API_KEY=your_key\nALPACA_SECRET_KEY=your_secret\nALPACA_FEED=iex\nALPACA_PAPER=true</pre><p>Use <code>ALPACA_PAPER=false</code> for live-account credentials. Credentials stay on your server. IEX data covers one exchange; consolidated SIP data requires the appropriate provider subscription.</p>`,
     csv:`<p><strong>${state.provider.csv_available ? "Your imported data is ready." : "Import daily prices to get started."}</strong> Your scan will use the symbols and completed sessions contained in the file. Uploading a new file replaces the workspace’s imported dataset; previous completed scans remain available.</p>`
   };
   $("#data-source-help").innerHTML = help[source];
@@ -482,9 +501,60 @@ function openSettings() {
   updateSourceControls();
   openDialog($("#settings-dialog"), "#settings-source");
 }
+function updateRestoreControls() {
+  $("#workspace-restore").disabled = state.workspaceBusy || !$("#workspace-restore-file").files.length || !$("#workspace-restore-confirm").checked;
+  $("#workspace-backup").disabled = state.workspaceBusy;
+  $("#workspace-restore-file").disabled = state.workspaceBusy;
+  $("#workspace-restore-confirm").disabled = state.workspaceBusy;
+  $('#settings-form button[type="submit"]').disabled = state.workspaceBusy || state.importBusy;
+}
+async function downloadBackup() {
+  if (state.workspaceBusy) return;
+  state.workspaceBusy = true;
+  updateRestoreControls();
+  showError("#workspace-data-error", "");
+  $("#workspace-data-status").textContent = "Preparing a consistent backup…";
+  try {
+    const response = await fetch("/api/workspace/backup", {cache:"no-store"});
+    if (!response.ok) throw new Error((await response.json()).error || "The backup could not be downloaded.");
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `nomisma-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.sqlite3`;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    $("#workspace-data-status").textContent = "Workspace backup downloaded.";
+  } catch (error) { showError("#workspace-data-error", error.message); $("#workspace-data-status").textContent = "Backup did not complete."; }
+  finally { state.workspaceBusy = false; updateRestoreControls(); }
+}
+async function restoreWorkspace() {
+  const file = $("#workspace-restore-file").files[0];
+  if (state.workspaceBusy || !file || !$("#workspace-restore-confirm").checked) return;
+  showError("#workspace-data-error", "");
+  if (!file.size || file.size > 128 * 1024 * 1024) { showError("#workspace-data-error", "Choose a nonempty Nomisma backup no larger than 128 MB."); return; }
+  if (state.job.running) { showError("#workspace-data-error", "Wait for the daily scan to finish before restoring."); return; }
+  state.workspaceBusy = true;
+  updateRestoreControls();
+  $("#workspace-data-status").textContent = "Validating your backup and preserving the current workspace…";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch("/api/workspace/restore", {method:"POST", headers:{"Content-Type":"application/octet-stream",Accept:"application/json"}, body:file, signal:controller.signal});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "The backup could not be restored.");
+    $("#workspace-data-status").textContent = `Workspace restored. Safety backup: ${result.backup_path}. Reloading…`;
+    // Read the restored state only after the server has replaced its database.
+    setTimeout(() => location.reload(), 1800);
+  } catch (error) {
+    showError("#workspace-data-error", error.name === "AbortError" ? "Restore response timed out. Reload to check the workspace before retrying." : error.message);
+    $("#workspace-data-status").textContent = "Restore did not complete successfully.";
+    state.workspaceBusy = false;
+    updateRestoreControls();
+  } finally { clearTimeout(timer); }
+}
 async function saveSettings(event) {
   event.preventDefault();
-  if (state.importBusy) return;
+  if (state.importBusy || state.workspaceBusy) return;
   const button = $('#settings-form button[type="submit"]');
   button.disabled = true;
   showError("#settings-error", "");
@@ -668,6 +738,12 @@ function bindEvents() {
   $("#settings-source").addEventListener("change", updateSourceControls);
   $("#settings-universe").addEventListener("change", updateSourceControls);
   $("#csv-file").addEventListener("change", importCSV);
+  $("#history-previous").addEventListener("click", () => loadHistory(state.historyOffset - state.pageSize));
+  $("#history-next").addEventListener("click", () => loadHistory(state.historyOffset + state.pageSize));
+  $("#workspace-backup").addEventListener("click", downloadBackup);
+  $("#workspace-restore-file").addEventListener("change", () => { $("#workspace-restore-confirm").checked = false; updateRestoreControls(); });
+  $("#workspace-restore-confirm").addEventListener("change", updateRestoreControls);
+  $("#workspace-restore").addEventListener("click", restoreWorkspace);
   $("#watchlist-add").addEventListener("click", addSymbol);
   $("#save-preset").addEventListener("click", savePreset);
   $("#preset-select").addEventListener("change", (event) => {
@@ -757,6 +833,7 @@ async function bootstrap() {
     state.watchlist = data.watchlist || [];
     state.latest = data.latest;
     state.history = data.history || [];
+    state.historyTotal = data.history_total ?? state.history.length;
     state.provider = data.provider_status || {};
     $("#loading-state").classList.add("hidden");
     $("#workspace-content").classList.remove("hidden");

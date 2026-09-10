@@ -4,10 +4,25 @@ Nomisma is Heuresis's first project: a local research workspace focused on **int
 
 ## Start
 
-From the Heuresis directory:
+For **Windows 11 Pro (Intel/AMD 64-bit)**, use the Windows installer or portable ZIP. The build includes Python and .NET, stores research data in your Windows profile, and can be built and published by GitHub Actions. See [Windows downloads, installation, and GitHub setup](desktop/WINDOWS.md).
+
+For the native macOS app, open **Nomisma** from `~/Applications`. It has its own window, app icon, menus, file dialogs, printing, and optional macOS notifications. Python and the local backend are included. The installed build reuses this workspace's research data and credentials. See [desktop setup and build instructions](desktop/README.md).
+
+On macOS, double-click **Launch Nomisma.command**. It starts this workspace's local server, waits for its health check, and opens the browser. Running the launcher again reuses the same server. A different application or workspace on the requested port is reported rather than replaced. The server continues after the launcher closes; market monitoring still requires **Start monitor**.
+
+The same launcher is available from the terminal:
 
 ```sh
-python3 projects/nomisma/run.py
+python3 launch.py
+python3 launch.py --port 8766 --data-dir /your/chosen/path
+```
+
+Use `--no-browser` to start the server without opening a tab. Startup errors are recorded in the chosen data directory's `nomisma.log`. The commands below keep the server attached to the terminal, where Ctrl+C stops it.
+
+From the Nomisma project directory:
+
+```sh
+python3 run.py
 ```
 
 Open **http://127.0.0.1:8765**. Python 3.9+ is required; there are no runtime dependencies, build steps, or external frontend assets. Use `--port 8766` if the default port is occupied. The web server binds only to your computer's loopback interface.
@@ -18,7 +33,7 @@ To try it without credentials, leave the source on **Synthetic demo**, then clic
 
 ## Connect real-time market data
 
-Create `projects/nomisma/.env` using [.env.example](.env.example) as a template, and fill in credentials from your own Alpaca account:
+Create `.env` using [.env.example](.env.example) as a template, and fill in credentials from your own Alpaca account:
 
 ```dotenv
 ALPACA_API_KEY=your_key_here
@@ -40,6 +55,16 @@ Alpaca's `iex` feed covers one exchange. Its volume is not consolidated US-marke
 Automated provider tests use simulated responses; they have not verified your actual Alpaca credentials or subscription entitlement. “Configured” means credentials are present. Confirm account connectivity by starting an Alpaca monitor and checking both **Live** status and each stock's price/quote timestamps.
 
 ## Intraday workflow and reports
+
+The default radar keeps the symbol, price/change, setup score, minute RVOL, spread, and eligibility together. Optional volume columns expose the detailed history metrics. Eligibility explains the main blocking condition; confirmation progress counts completed eligible minute bars independently of the technical score. A score above the Buy threshold does not override missing data, a wide spread, or any other guard.
+
+The stock report overlays session VWAP and EMA9/EMA20 on completed minute prices, with minute volume and saved-alert markers. Gaps and unavailable indicators stay unavailable. The chart uses the same completed-bar calculations as the score.
+
+**Test connection** runs a read-only diagnostic and reports its results separately from monitor control. It checks the configured source, provider access, timestamps, and history coverage. An already-running market stream supplies subscription evidence; a stopped monitor can be tested with a temporary bounded connection. A diagnostic does not save alerts or start an ongoing monitor.
+
+**Find candidates** searches a selected universe using current-session snapshots, price, day change, and feed-day volume. Review the source, feed coverage, market phase, refresh time, and each result's freshness before selecting up to 20 symbols. Applying a selection requires a stopped monitor and saves its configuration; it does not start monitoring. Discovery is a snapshot search, not a continuous whole-market stream. Synthetic discovery results remain explicitly synthetic. Real-source failures are never replaced with demo data.
+
+When the provider accepts optional trading-status and limit-price-band subscriptions, current-session events appear in the report. Confirmed halted or paused states suppress setup alerts. Missing status coverage means **unavailable**, not an assurance that trading is unrestricted.
 
 The monitor's editable defaults are a $0.50–$5 price range, at least 100,000 shares of completed regular-session volume, latest-minute relative volume of at least 1.5×, and a bid/ask spread no wider than 2%. Buy begins at 65/100 and Strong buy at 85/100, with two consecutive completed minute bars required before saving an alert and a 300-second repeat cooldown. These are research defaults, not a backtested strategy.
 
@@ -71,7 +96,7 @@ Prices can update with each trade, but the technical score uses the latest **com
 
 Only a new completed minute bar advances alert confirmation. Quotes, trades, duplicates, historical reloading, and late corrections do not independently generate notifications. A confirmed Strong buy upgrade may alert during the Buy cooldown. Repeating a level requires a reset to Watch and expiration of the cooldown. Alert history and deduplication state persist locally, and **Mark read** acknowledges inbox alerts.
 
-Desktop notifications and sound are **off by default** and require an explicit click in the browser tab. Desktop permission depends on the browser's localhost notification support and site settings. Previously saved alerts are not replayed as notifications. Keep the Nomisma process and computer running for server-side monitoring, and keep the browser tab open for desktop alerts and sound; browser suspension can delay their delivery. Closing the tab does not stop a running server monitor, so use **Stop** when finished. Restarting Nomisma requires a new **Start**. No background system service is installed.
+Desktop notifications and sound are **off by default** and require an explicit click in the app or browser tab. Native apps use the operating system's notification delivery; the browser version depends on localhost notification support and site settings. Previously saved alerts are not replayed as notifications. Keep the local server and computer running for monitoring, and keep the native app running or browser tab open for desktop alerts and sound; computer sleep or web-view suspension can delay delivery. The macOS app leaves its local server running when closed or quit. The Windows app stops the local service it started when you exit; an independently started service continues running. Use **Stop monitor** to end streaming while keeping a workspace open. Restarting the server requires a new **Start**. No background system service is installed.
 
 These Buy / Strong buy labels are explainable heuristics, not purchase instructions or calibrated predictions. Nomisma does not guarantee halt detection or analyze live news, filings, dilution, or execution costs. It never submits orders.
 
@@ -120,7 +145,7 @@ The built-in schedule uses **America/New_York**, including daylight-saving chang
 For your own task scheduler, run one scan and exit using saved settings:
 
 ```sh
-python3 projects/nomisma/run.py --scan
+python3 run.py --scan
 ```
 
 Use `--scan --source alpaca` for a one-off source override. The process exits nonzero on failure and prints the saved scan ID, source, data date, and counts on success. Avoid running separate scheduled processes against the same data directory simultaneously; the built-in scan lock applies to one app process.
@@ -133,7 +158,17 @@ The daily and intraday scores are separate hand-designed rankings. Neither is th
 
 ## Storage and testing
 
-Settings, presets, watchlists, imported data, scans, monitor configuration, manual float overrides, and setup alerts are stored in `projects/nomisma/data/nomisma.sqlite3`. Stop the app before copying this directory for a backup. Use `--data-dir /your/chosen/path` to keep a separate workspace. The UI lists the most recent 100 scans and 100 monitor alerts; older records remain in the local database. Alert acknowledgment state is saved too.
+Settings, presets, watchlists, imported data, scans, monitor configuration, manual float overrides, and setup alerts are stored in `data/nomisma.sqlite3`. Runtime data and backups are excluded from Git. Use `--data-dir /your/chosen/path` to keep a separate workspace. Scan history and the alert journal have pagination so older records remain accessible. Alert acknowledgment state is saved too.
+
+In **Settings**, download a consistent SQLite backup while the app is running. To restore, stop monitoring and wait for any scan, diagnostic, or discovery job to finish, choose the backup file, and click **Restore**. The app validates the file before changing data and saves the current workspace under `data/backups/before-restore-….sqlite3`. Only validated rows are copied into the app's own database schema. Restore replaces local research data and settings; the restored monitor remains stopped. Credentials are held separately in `.env` and are never included in these database backups. Uploaded backups are limited to 128 MB. Stop the app first if copying the database manually instead.
+
+### Alert evidence and observed outcomes
+
+New alerts preserve their configuration, data quality, indicator values, session metadata, and minute chart as they appeared at the setup. Open a saved alert to inspect that evidence even if its symbol is no longer monitored. Alerts created before this feature remain available, with missing original evidence explicitly identified.
+
+The journal measures **observed price changes**, not fills, trades, profits, or a backtest. Its reference is the completed signal minute's close. For each 5-, 15-, and 30-minute window after that minute ends, close change is `(last window close / reference close − 1) × 100`; adverse movement is `min(0, (lowest window low / reference close − 1) × 100)`. A window must consist entirely of completed contiguous minutes from the same symbol, source, feed, and session. Incomplete windows show pending or unavailable, never invented returns. Windows beyond the session close are unavailable. Current-session bar corrections can revise observations without altering the original alert evidence.
+
+Keep the relevant symbol monitored to collect its future window. Loading matching session history can repair gaps. Previously observed results remain saved when the monitor changes sessions or symbols. Fees, slippage, spread, position sizing, and execution feasibility are not modeled.
 
 From the project directory:
 

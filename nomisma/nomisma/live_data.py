@@ -564,12 +564,32 @@ def stream_live(symbols, on_event, stop_event, on_status=None):
                               "secret": headers["APCA-API-SECRET-KEY"]})
         authenticated = False
         subscribed = False
+        optional_channels = ["statuses", "lulds"]
+        optional_pending = None
+        optional_confirmed = {"statuses": False, "lulds": False}
+
+        def report_channels(message):
+            on_event(dict({"T": "nomisma_subscription", "required": True,
+                           "checked_at": _now().isoformat(), "message": message}, **optional_confirmed))
+
+        def subscribe_optional():
+            # Entitlements vary by channel. Keep these separate from the price
+            # request so a rejected optional channel cannot invalidate its ACK.
+            nonlocal optional_pending
+            optional_pending = optional_channels.pop(0) if optional_channels else None
+            if optional_pending and not stop_event.is_set():
+                connection.send_json({"action": "subscribe", optional_pending: symbols})
+
         deadline = time.monotonic() + 10
         while not stop_event.is_set():
             for event in connection.message(None if subscribed else deadline):
                 _check_stop(stop_event)
                 kind = event.get("T")
                 if kind == "error":
+                    if subscribed and optional_pending and event.get("code") in (409, 410):
+                        report_channels("{} was not available for this subscription; price data remains connected.".format(optional_pending))
+                        subscribe_optional()
+                        continue
                     raise _stream_error(event)
                 if kind == "success" and event.get("msg") == "authenticated" and not authenticated:
                     authenticated = True
@@ -584,8 +604,18 @@ def stream_live(symbols, on_event, stop_event, on_status=None):
                         raise ValueError("Alpaca did not confirm all requested live data subscriptions.")
                     if not subscribed:
                         subscribed = True
+                        report_channels("Price subscriptions confirmed; optional trading status and price bands are being checked.")
                         if on_status:
                             on_status("live")
+                        subscribe_optional()
+                    elif optional_pending:
+                        values = event.get(optional_pending)
+                        optional_confirmed[optional_pending] = (isinstance(values, list)
+                            and (set(symbols).issubset(set(value for value in values if isinstance(value, str)))
+                                 or "*" in values))
+                        report_channels("{} {}. A channel subscription does not establish a security's current halt status.".format(
+                            optional_pending, "confirmed" if optional_confirmed[optional_pending] else "not confirmed"))
+                        subscribe_optional()
                 elif kind in ("t", "q", "b", "u", "d", "c", "x", "s", "l"):
                     if not subscribed:
                         raise ValueError("Alpaca sent market events before confirming the subscription.")

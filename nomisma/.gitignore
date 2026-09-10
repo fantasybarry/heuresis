@@ -1,0 +1,10 @@
+/data/
+__pycache__/
+*.py[cod]
+.env
+.DS_Store
+/artifacts/
+/dist/
+/build/
+/desktop/windows/bin/
+/desktop/windows/obj/

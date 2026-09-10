@@ -420,6 +420,46 @@ class SetupSafetyTests(unittest.TestCase):
         bundle.update(source="alpaca", feed="delayed_sip")
         self.assertFalse(row(bundle, now)["alert_eligible"])
 
+    def test_chart_has_matching_vwap_ema_ohlc_and_minute_volume(self):
+        bundle, now = fixture()
+        result = row(bundle, now)
+        point = result["chart"][-1]
+        for indicator in ("vwap", "ema9", "ema20"):
+            self.assertAlmostEqual(point[indicator], result[indicator])
+        raw = bundle["assets"][0]["minutes"][-1]
+        for key in ("open", "high", "low", "close", "volume"):
+            self.assertEqual(point[key], raw[key])
+        self.assertIsNone(result["chart"][7]["ema9"])
+        self.assertIsNotNone(result["chart"][8]["ema9"])
+        bundle["assets"][0]["minutes"].pop(10)
+        incomplete = row(bundle, now)
+        self.assertIsNone(incomplete["chart"][-1]["vwap"])
+        self.assertIsNone(incomplete["vwap"])
+
+    def test_status_is_unknown_without_event_and_halts_block_until_trading_resumes(self):
+        bundle, now = fixture()
+        self.assertIsNone(row(bundle, now)["trading_status"]["halted"])
+        snapshot = bundle["assets"][0]["snapshot"]
+        for code in ("2", "F", "H", "P", "Q"):
+            snapshot["tradingStatus"] = {"t": now.isoformat(), "sc": code, "sm": "Trading status"}
+            result = row(bundle, now)
+            self.assertTrue(result["trading_status"]["halted"])
+            self.assertFalse(result["alert_eligible"])
+        for code in ("3", "T"):
+            snapshot["tradingStatus"]["sc"] = code
+            self.assertFalse(row(bundle, now)["trading_status"]["halted"])
+        snapshot["tradingStatus"]["t"] = (now - timedelta(days=1)).isoformat()
+        self.assertIsNone(row(bundle, now)["trading_status"]["halted"])
+
+    def test_eligibility_exposes_numeric_thresholds(self):
+        bundle, now = fixture()
+        result = row(bundle, now, min_relative_volume=100)
+        check = next(item for item in result["eligibility"]["checks"] if item["name"] == "Minute RVOL")
+        self.assertEqual(check["required"], 100)
+        self.assertEqual(check["actual"], result["minute_relative_volume"])
+        self.assertFalse(check["passed"])
+        self.assertTrue(result["eligibility"]["primary_blocker"])
+
 
 if __name__ == "__main__":
     unittest.main()

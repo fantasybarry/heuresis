@@ -279,3 +279,123 @@
   body.printing-live-report .live-report-section { break-inside:auto; }
   body.printing-live-report .live-volume-chart,body.printing-live-report .live-price-chart { print-color-adjust:exact; -webkit-print-color-adjust:exact; }
 }
+
+/* Compact radar and research tools. */
+.live-active .page-heading { margin-top:23px; margin-bottom:19px; }
+.live-command { flex-wrap:wrap; padding:15px 19px; gap:15px; }
+.live-command-actions { flex-wrap:wrap; }
+#live-view .live-command-actions .button { min-height:36px; padding:8px 11px; font-size:12px; }
+.live-overview { gap:12px; margin:15px 0; }
+.live-stat { padding:13px 16px; }
+.live-stat>span { font-size:11px; }
+.live-stat>strong { font-size:26px; margin:8px 0 5px; }
+.live-stat>small { font-size:10px; line-height:1.45; }
+.live-stat.session>strong { font-size:20px; margin:10px 0 6px; }
+.live-workspace { grid-template-columns:minmax(0,1fr) 278px; gap:17px; }
+.live-panel-heading { padding:18px 18px 14px; }
+.live-table-toolbar { padding:0 18px 12px; }
+.live-columns { display:flex; flex-direction:row; align-items:center; gap:8px; font-size:11px; color:#6c7965; font-weight:400; padding:0 18px 14px; }
+.live-columns input { margin:0; accent-color:#5b8248; }
+.live-stocks { min-width:660px; font-size:12px; }
+.live-stocks.expanded { min-width:1440px; }
+.live-stocks th,.live-stocks td { padding-left:10px; padding-right:10px; }
+.live-stocks td { padding-top:13px; padding-bottom:13px; }
+.live-stocks td:first-child,.live-stocks th:first-child { padding-left:18px; }
+.live-stocks .live-eligibility { white-space:normal; min-width:165px; max-width:250px; line-height:1.55; }
+.live-stocks .live-eligibility strong { font-size:11px; font-weight:500; }
+.live-stocks .live-eligibility small { font-size:10px; color:#7d8b73; }
+.live-blocked-label { color:#8b734c; }
+.live-journal-link { padding:13px 18px; border-top:1px solid #e7eddf; }
+.live-journal-link .button { width:100%; }
+.live-research-modal { width:min(980px,calc(100vw - 36px)); }
+.live-research-modal .modal-header p,.live-research-modal label { font-size:13px; }
+.live-research-modal .button { font-size:12px; min-height:38px; }
+.live-research-modal .modal-body>h3,.live-research-modal .modal-body>div>h3 { font-size:16px; margin:23px 0 14px; }
+.live-research-modal .field-help { font-size:11px; line-height:1.7; }
+.live-research-modal .modal-footer { gap:18px; }
+.live-research-modal .modal-footer>.field-help { max-width:65%; }
+.live-research-modal .live-history-table { min-width:590px; }
+.live-research-modal .live-history-table th { text-align:left; font-size:10px; }
+.live-research-modal .live-history-table td { font-size:12px; line-height:1.7; }
+.live-research-modal .live-history-table td small { display:block; font-size:10px; color:#7d8b73; }
+.live-research-modal .live-history-table .text-button { font-size:12px; text-align:left; }
+.live-research-modal fieldset { padding:0; margin:0; border:0; min-width:0; }
+.live-research-modal fieldset:disabled { opacity:.65; }
+#live-discovery-form .live-form-grid { gap:15px 19px; margin-bottom:18px; }
+#live-discovery-form>.field-help,#live-discovery-form fieldset>.field-help { margin:16px 0; }
+#live-discovery-custom { margin:16px 0; }
+.live-candidate-table input { accent-color:#5b8248; width:17px; height:17px; }
+.live-coverage { font-size:12px; line-height:1.8; margin:18px 0; color:#62745a; }
+.live-diagnostic-checks { margin:20px 0 25px; }
+.live-diagnostic-checks article { display:flex; gap:16px; padding:16px 0; border-bottom:1px solid #e7eddf; align-items:flex-start; }
+.live-diagnostic-checks h3 { font-size:13px; margin-bottom:7px; }
+.live-diagnostic-checks p { font-size:12px; line-height:1.7; color:#718168; }
+.live-diagnostic-status { min-width:65px; border-radius:5px; padding:5px 7px; text-align:center; font-size:10px; text-transform:uppercase; background:#f0f2ed; color:#6a785f; }
+.live-diagnostic-status.pass { background:#e6efde; color:#4d7043; }
+.live-diagnostic-status.warning { background:#f6efdf; color:#8b7040; }
+.live-diagnostic-status.fail { background:#f8e8e0; color:#9b5e46; }
+.live-chart-legend { display:flex; flex-wrap:wrap; gap:10px 18px; margin:10px 0 15px; color:#617257; font-size:11px; }
+.live-chart-legend span { display:flex; gap:6px; align-items:center; }
+.live-chart-legend i { display:inline-block; width:16px; height:3px; }
+.live-chart-data { margin:17px 0; font-size:11px; color:#6e7d62; }
+.live-chart-data summary,.live-saved-json summary { cursor:pointer; }
+.live-chart-data .live-table-scroll { max-height:290px; margin-top:12px; }
+.live-chart-data table { min-width:540px; }
+.live-evidence-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); margin:16px 0; border-left:1px solid #e7edde; border-top:1px solid #e7edde; }
+.live-saved-json { margin:22px 0; color:#63765b; font-size:12px; }
+.live-saved-json pre { max-height:330px; overflow:auto; background:#f6f8f1; padding:15px; font-size:11px; line-height:1.55; }
+.live-outcomes-title { margin-top:28px!important; }
+.live-outcomes { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:16px 0 5px; }
+.live-outcomes article { border:1px solid #e1e8d8; background:#fafcf6; padding:16px; border-radius:8px; min-width:0; }
+.live-outcomes h4 { font-size:13px; margin:0 0 8px; }
+.live-outcome-status { text-transform:capitalize; font-size:11px; color:#6f7e63; }
+.live-outcomes strong { display:block; font-size:24px; margin:12px 0; }
+.live-outcomes p { font-size:11px; line-height:1.7; margin-top:9px; }
+.live-outcomes small { display:block; font-size:10px; line-height:1.7; color:#7c896f; margin-top:7px; }
+@media(max-width:1380px) {
+  .live-workspace { grid-template-columns:1fr; }
+  .live-alert-rail { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); gap:20px; }
+  .live-alert-list { max-height:310px; }
+  .live-command-actions { margin-left:auto; }
+}
+@media(max-width:760px) {
+  .live-overview { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+  .live-stat { padding:12px; }
+  .live-stat>strong { font-size:24px; }
+  .live-command-actions { width:100%; margin-left:0; }
+  .live-alert-rail { display:flex; }
+  .live-research-modal { width:calc(100vw - 20px); }
+  .live-research-modal .modal-footer { flex-wrap:wrap; }
+  .live-research-modal .modal-footer>.field-help { max-width:none; }
+  .live-outcomes { grid-template-columns:1fr; }
+  .live-evidence-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .live-stocks { min-width:650px; }
+  .live-table-footer { padding:13px 18px; }
+}
+@media(max-width:550px) {
+  .live-research-modal .live-form-grid { grid-template-columns:1fr; }
+  .live-research-modal .modal-header h2 { font-size:21px; }
+  .live-command-actions .button { flex:1 1 auto; }
+}
+.live-gate-checks { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:15px 0 22px; }
+.live-gate-checks>div { padding:12px 14px; border:1px solid #e4eadb; border-radius:7px; display:flex; flex-direction:column; gap:6px; }
+.live-gate-checks strong { font-size:11px; font-weight:550; }
+.live-gate-checks span { font-size:12px; }
+.live-gate-checks small { font-size:10px; color:#7f8d73; }
+@media(max-width:550px) { .live-gate-checks { grid-template-columns:1fr; } }
+/* On narrow screens each compact radar row becomes a complete setup card. */
+@media(max-width:760px) {
+  .live-stocks:not(.expanded) { display:block; min-width:0; width:100%; }
+  .live-stocks:not(.expanded) thead { display:none; }
+  .live-stocks:not(.expanded) tbody { display:block; }
+  .live-stocks:not(.expanded) tr { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px 12px; padding:17px 18px; border-top:1px solid #e7edde; }
+  .live-stocks:not(.expanded) td { display:block; padding:0; border:0; min-width:0; white-space:normal; background:transparent; }
+  .live-stocks:not(.expanded) td:first-child { position:static; box-shadow:none; }
+  .live-stocks:not(.expanded) td[data-label]::before { content:attr(data-label); display:block; margin-bottom:6px; color:#78876b; font-size:10px; font-weight:400; }
+  .live-stocks:not(.expanded) td:nth-child(4) { grid-column:1; text-align:left!important; }
+  .live-stocks:not(.expanded) td:nth-child(5) { grid-column:2; text-align:left!important; }
+  .live-stocks:not(.expanded) td.live-eligibility { grid-column:1/-1; max-width:none; min-width:0; padding-top:10px; border-top:1px solid #edf0e7; overflow-wrap:anywhere; }
+  .live-stocks:not(.expanded) .live-eligibility strong { font-size:12px; }
+  .live-stocks:not(.expanded) .live-setup { white-space:normal; line-height:1.5; }
+  .live-stocks:not(.expanded) td:nth-child(2) strong { font-size:14px; overflow-wrap:anywhere; }
+}

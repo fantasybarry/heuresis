@@ -234,9 +234,27 @@ must never make a fresh trade or quote change the completed-bar setup score.
         closes = [bar["close"] for bar in minutes]
         ema9_series = _ema(closes, 9) if len(closes) >= 9 else []
         ema9 = ema9_series[-1] if ema9_series else None
-        ema20 = _ema(closes, 20)[-1] if len(closes) >= 20 else None
+        ema20_series = _ema(closes, 20) if len(closes) >= 20 else []
+        ema20 = ema20_series[-1] if ema20_series else None
         rsi = _rsi(closes) if len(closes) >= 15 else None
         snapshot = asset.get("snapshot") if isinstance(asset.get("snapshot"), dict) else {}
+        raw_status = snapshot.get("tradingStatus") or {}
+        status_at = _time(raw_status.get("t")) if isinstance(raw_status, dict) else None
+        status_code = str(raw_status.get("sc", "")) if isinstance(raw_status, dict) else ""
+        halt_codes = {"2", "F", "H", "Q", "P"}
+        known_status = bool(status_at and status_at <= now and status_at.astimezone(_NY).date() == session_date
+                            and status_code in halt_codes | {"3", "T"})
+        trading_status = {"available": known_status, "code": status_code if known_status else None,
+                          "reason": (raw_status.get("rm") or raw_status.get("sm")) if known_status else "Trading status unavailable; no current-session status event has been received.",
+                          "at": _iso(status_at) if known_status else None,
+                          "halted": status_code in halt_codes if known_status else None}
+        raw_bands = snapshot.get("priceBands") or {}
+        bands_at = _time(raw_bands.get("t")) if isinstance(raw_bands, dict) else None
+        valid_bands = bool(bands_at and bands_at <= now and bands_at.astimezone(_NY).date() == session_date
+                           and _number(raw_bands.get("u"), 0.000001, 1e9) and _number(raw_bands.get("d"), 0.000001, 1e9)
+                           and raw_bands["d"] <= raw_bands["u"])
+        price_bands = {"available": valid_bands, "upper": raw_bands["u"] if valid_bands else None,
+                       "lower": raw_bands["d"] if valid_bands else None, "at": _iso(bands_at) if valid_bands else None}
         provider_daily = snapshot.get("dailyBar") if isinstance(snapshot.get("dailyBar"), dict) else {}
         provider_daily_time = _time(provider_daily.get("t"))
         valid_daily_volume = (provider_daily_time is not None and provider_daily_time <= now
@@ -283,7 +301,11 @@ must never make a fresh trade or quote change the completed-bar setup score.
             warnings.append("Synthetic historical simulation; prices, volume and float are invented.")
         elif feed == "iex":
             warnings.append("IEX volume covers one exchange, not consolidated market volume.")
-        warnings.append("Trading halts and company news are not guaranteed to be detected; verify before acting.")
+        if not known_status:
+            warnings.append(trading_status["reason"])
+        if trading_status["halted"]:
+            blockers.append("Trading is halted, paused, or awaiting full trading resumption according to the current-session status event.")
+        warnings.append("Company news is not evaluated by this technical setup score.")
         if not valid_session:
             blockers.append("A valid exchange session and previous session are required.")
         if not market_open:
@@ -358,6 +380,29 @@ must never make a fresh trade or quote change the completed-bar setup score.
             blockers.append("Setup alerts are disabled in monitor settings.")
         eligible = not blockers
         signal = "Strong buy" if eligible and score >= config["strong_buy_score"] else "Buy" if eligible and score >= config["buy_score"] else "Watch"
+        checks = [
+            {"name": "Minute RVOL", "actual": minute_rvol, "required": config["min_relative_volume"], "passed": volume_ok, "unit": "×"},
+            {"name": "Session volume", "actual": session_volume, "required": config["min_session_volume"], "passed": session_volume is not None and session_volume >= config["min_session_volume"], "unit": "shares"},
+            {"name": "Spread maximum", "actual": spread, "required": config["max_spread_pct"], "passed": spread is not None and spread <= config["max_spread_pct"], "unit": "%"},
+            {"name": "Buy score", "actual": score, "required": config["buy_score"], "passed": score >= config["buy_score"], "unit": "points"},
+        ]
+        # The same complete-bar calculations power the chart and score. VWAP
+        # becomes unavailable at a missing minute or missing positive VWAP.
+        chart, cumulative_volume, cumulative_value = [], 0, 0
+        chart_coverage = has_opening and not invalid_minutes
+        prior_chart_time = None
+        for index, bar in enumerate(minutes):
+            chart_coverage = chart_coverage and (prior_chart_time is None or bar["t"] - prior_chart_time == _MINUTE)
+            if bar["volume"] > 0:
+                chart_coverage = chart_coverage and bar["vwap"] is not None
+                cumulative_volume += bar["volume"]
+                cumulative_value += (bar["vwap"] or 0) * bar["volume"]
+            chart.append({"t": _iso(bar["t"]), "open": bar["open"], "high": bar["high"], "low": bar["low"],
+                          "close": bar["close"], "volume": bar["volume"],
+                          "vwap": cumulative_value / cumulative_volume if chart_coverage and cumulative_volume else None,
+                          "ema9": ema9_series[index] if ema9_series else None,
+                          "ema20": ema20_series[index] if ema20_series else None})
+            prior_chart_time = bar["t"]
         rows.append({
             "symbol": symbol, "name": asset.get("name") or symbol,
             "source": source, "feed": feed, "price": price, "price_at": _iso(price_at),
@@ -373,11 +418,15 @@ must never make a fresh trade or quote change the completed-bar setup score.
             "gap_pct": gap, "change_pct": change, "spread_pct": spread,
             "vwap": vwap, "ema9": ema9, "ema20": ema20, "rsi": rsi,
             "signal_score": score, "signal": signal, "alert_eligible": eligible,
+            "eligibility": {"eligible": eligible, "primary_blocker": blockers[0] if blockers else
+                            ("Score %s; requires %s points for Buy." % (score, config["buy_score"]) if score < config["buy_score"] else None),
+                            "checks": checks},
+            "trading_status": trading_status, "price_bands": price_bands,
             "signal_bar_at": _iso(last["t"]) if last else None,
             "reasons": [name for name, condition, points, description in conditions if condition],
             "blockers": blockers, "warnings": warnings, "stale": stale,
             "market_open": market_open,
-            "chart": [{"t": _iso(bar["t"]), "close": bar["close"], "volume": bar["volume"]} for bar in minutes],
+            "chart": chart,
             "volume_history": [{"date": bar["date"], "volume": bar["volume"]} for bar in history],
             "signals": signals,
         })

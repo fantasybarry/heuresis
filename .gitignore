@@ -3,5 +3,5 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
-projects/nomisma/data/
+nomisma/data/
 artifacts/

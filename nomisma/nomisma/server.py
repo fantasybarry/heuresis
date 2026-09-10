@@ -1,12 +1,14 @@
 """Loopback web application, scan orchestration, and persistent daily scheduling."""
 
 import csv
+import copy
 import io
 import json
 import logging
 import mimetypes
 import re
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +23,7 @@ from .monitor import LiveMonitor, MonitorBusy, monitor_csv
 LOGGER = logging.getLogger("nomisma")
 STATIC = Path(__file__).parent / "static"
 MAX_BODY = 25 * 1024 * 1024
+MAX_BACKUP = 128 * 1024 * 1024
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.\-]{0,14}$")
 
 
@@ -74,6 +77,8 @@ class Application:
     def __init__(self, directory, seed=True):
         self.store = Store(directory)
         self.lock = threading.Lock()
+        self.mutation_lock = threading.RLock()
+        self.research_jobs = {}
         self.stop_event = threading.Event()
         self.job = {"running": False, "message": "Ready to scan", "error": None, "scan_id": None}
         if self.store.get("settings") is None:
@@ -110,7 +115,7 @@ class Application:
 
     def check_source(self, settings):
         if settings["source"] == "alpaca" and not provider_status()["alpaca_configured"]:
-            raise ValueError("Alpaca is not connected. Add ALPACA_API_KEY and ALPACA_SECRET_KEY to projects/nomisma/.env, then restart Nomisma.")
+            raise ValueError("Alpaca is not connected. Add ALPACA_API_KEY and ALPACA_SECRET_KEY to this project's .env, then restart Nomisma.")
         if settings["source"] == "csv" and self.store.get("csv_dataset") is None:
             raise ValueError("Import a historical OHLCV CSV before scanning this source.")
 
@@ -138,6 +143,10 @@ class Application:
         return self.store.save_scan(screen(dataset, settings["filters"]))
 
     def start_scan(self, payload, scheduled_date=None):
+        with self.mutation_lock:
+            return self._start_scan(payload, scheduled_date)
+
+    def _start_scan(self, payload, scheduled_date=None):
         settings = validate_settings(payload, self.settings())
         self.check_source(settings)
         with self.lock:
@@ -148,6 +157,60 @@ class Application:
         worker = threading.Thread(target=self._worker, args=(settings, scheduled_date), daemon=True, name="nomisma-scan")
         worker.start()
         return job
+
+    def start_research(self, kind, payload):
+        if kind not in ("diagnostics", "discovery"):
+            raise ValueError("Unknown research action.")
+        with self.lock:
+            if any(job["running"] for job in self.research_jobs.values()):
+                raise BusyError("A market-data check or discovery search is already running.")
+            identifier = uuid.uuid4().hex
+            job = {"id": identifier, "kind": kind, "running": True,
+                   "message": "Checking market data…" if kind == "diagnostics" else "Finding session candidates…",
+                   "error": None, "result": None}
+            self.research_jobs[identifier] = job
+            while len(self.research_jobs) > 32:
+                del self.research_jobs[next(iter(self.research_jobs))]
+            initial = copy.deepcopy(job)
+
+        def progress(message):
+            with self.lock:
+                job["message"] = str(message)
+
+        def work():
+            try:
+                from .research import diagnose, discover
+                if kind == "diagnostics":
+                    snapshot = self.monitor.snapshot()
+                    result = diagnose(snapshot["config"], snapshot, progress=progress, stop_event=self.stop_event,
+                                      snapshot_provider=self.monitor.snapshot)
+                else:
+                    result = discover(copy.deepcopy(payload), progress=progress, stop_event=self.stop_event)
+                with self.lock:
+                    job.update(running=False, message="Check complete" if kind == "diagnostics" else "Discovery complete", result=result)
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, ValueError) else "The research action could not finish. Check your connection and try again."
+                with self.lock:
+                    job.update(running=False, message="Needs attention", error=message)
+                LOGGER.warning("Research action failed (%s)", type(exc).__name__)
+
+        threading.Thread(target=work, name="nomisma-" + kind, daemon=True).start()
+        return initial
+
+    def research_status(self, identifier):
+        with self.lock:
+            return copy.deepcopy(self.research_jobs.get(identifier))
+
+    def restore_workspace(self, content):
+        with self.mutation_lock, self.lock:
+            if self.job["running"] or self.monitor.status["running"] or any(job["running"] for job in self.research_jobs.values()):
+                raise BusyError("Stop the monitor and wait for scans and research checks to finish before restoring.")
+            result = self.store.restore_backup(content)
+            self.monitor.close()
+            self.monitor = LiveMonitor(self.store)
+            self.job = {"running": False, "message": "Workspace restored", "error": None, "scan_id": None}
+            self.research_jobs = {}
+            return dict(result, restored=True)
 
     def _worker(self, settings, scheduled_date):
         try:
@@ -160,13 +223,13 @@ class Application:
         except Exception as exc:
             # Do not log request headers, credentials, or provider response bodies.
             message = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else "The scan could not finish. Check your data source and try again."
-            with self.lock:
-                self.job = {"running": False, "message": "Scan failed", "error": message, "scan_id": None}
             if scheduled_date:
                 try:
                     self.store.set("schedule_retry_after", (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat())
                 except Exception as persistence_error:
                     LOGGER.warning("Could not save scheduler retry state (%s)", type(persistence_error).__name__)
+            with self.lock:
+                self.job = {"running": False, "message": "Scan failed", "error": message, "scan_id": None}
             LOGGER.warning("Scan failed (%s)", type(exc).__name__)
 
     def schedule_due(self, now=None):
@@ -184,6 +247,10 @@ class Application:
         return date
 
     def scheduler_tick(self, now=None):
+        with self.mutation_lock:
+            return self._scheduler_tick(now)
+
+    def _scheduler_tick(self, now=None):
         due = self.schedule_due(now)
         if due:
             try:
@@ -261,12 +328,46 @@ def make_handler(app):
                 return False
             return True
 
+        def _page(self, query):
+            params = parse_qs(query)
+            try:
+                limit = int(params.get("limit", ["20"])[0])
+                offset = int(params.get("offset", ["0"])[0])
+            except (TypeError, ValueError):
+                raise ValueError("Pagination requires integer limit and offset.") from None
+            if not 1 <= limit <= 100 or not 0 <= offset <= 10000000:
+                raise ValueError("Limit must be 1–100 and offset must be 0–10000000.")
+            return limit, offset
+
         def do_GET(self):
             if not self._same_origin():
                 return
             try:
                 parsed = urlparse(self.path)
                 path = parsed.path
+                if path == "/api/health":
+                    return self._json({"app": "nomisma", "status": "ok", "version": "2", "data_directory": str(app.store.directory)})
+                if path == "/api/history":
+                    limit, offset = self._page(parsed.query)
+                    return self._json({"history": app.store.history(limit, offset), "total": app.store.history_total(), "limit": limit, "offset": offset})
+                if path == "/api/monitor/alerts":
+                    limit, offset = self._page(parsed.query)
+                    return self._json({"alerts": app.store.monitor_alerts(limit, offset), "total": app.store.monitor_alerts_total(), "limit": limit, "offset": offset})
+                if path.startswith("/api/monitor/alerts/"):
+                    # Detail can reconcile observed outcomes. Resolve the
+                    # monitor inside the restore boundary, never against the
+                    # previous workspace while its rows are being replaced.
+                    with app.mutation_lock:
+                        alert = app.monitor.alert_detail(path.removeprefix("/api/monitor/alerts/"))
+                    return self._json(alert or {"error": "Alert not found."}, 200 if alert else 404)
+                if path.startswith("/api/research/jobs/"):
+                    job = app.research_status(path.removeprefix("/api/research/jobs/"))
+                    return self._json({"job": job} if job else {"error": "Research job not found."}, 200 if job else 404)
+                if path == "/api/workspace/backup":
+                    data = app.store.backup()
+                    filename = "nomisma-backup-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".sqlite3"
+                    self._headers(200, "application/vnd.sqlite3", len(data), {"Content-Disposition": 'attachment; filename="' + filename + '"'})
+                    return self.wfile.write(data)
                 if path == "/api/bootstrap":
                     return self._json(app.bootstrap())
                 if path == "/api/monitor":
@@ -302,6 +403,8 @@ def make_handler(app):
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
             except Exception as exc:
                 LOGGER.warning("Request failed (%s)", type(exc).__name__)
                 self._json({"error": "The request could not be completed."}, 500)
@@ -337,7 +440,22 @@ def make_handler(app):
         def do_POST(self):
             if not self._same_origin():
                 return
+            with app.mutation_lock:
+                self._post()
+
+        def _post(self):
             try:
+                path = urlparse(self.path).path
+                if path == "/api/workspace/restore":
+                    if self.headers.get_content_type() not in ("application/octet-stream", "application/vnd.sqlite3"):
+                        return self._json({"error": "Choose a Nomisma SQLite backup file."}, 415)
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= length <= MAX_BACKUP:
+                        return self._json({"error": "Backup must be between 1 byte and 128 MB."}, 413)
+                    content = self.rfile.read(length)
+                    if len(content) != length:
+                        raise ValueError("The backup upload was incomplete.")
+                    return self._json(app.restore_workspace(content))
                 if self.headers.get_content_type() != "application/json":
                     return self._json({"error": "Send a JSON request body."}, 415)
                 length = int(self.headers.get("Content-Length", "0"))
@@ -346,10 +464,16 @@ def make_handler(app):
                 payload = json.loads(self.rfile.read(length), parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Non-finite JSON numbers are not allowed.")))
                 if not isinstance(payload, dict):
                     raise ValueError("Send a JSON object.")
-                path = urlparse(self.path).path
+                if path == "/api/diagnostics":
+                    return self._json({"job": app.start_research("diagnostics", payload)}, 202)
+                if path == "/api/discovery":
+                    return self._json({"job": app.start_research("discovery", payload)}, 202)
                 if path == "/api/monitor/config":
                     return self._json({"config": app.monitor.save_config(payload)})
                 if path == "/api/monitor/start":
+                    with app.lock:
+                        if any(job["running"] and job["kind"] == "diagnostics" for job in app.research_jobs.values()):
+                            raise BusyError("Wait for the connection diagnostic to finish before starting the monitor.")
                     return self._json(app.monitor.start(payload), 202)
                 if path == "/api/monitor/stop":
                     return self._json(app.monitor.stop())

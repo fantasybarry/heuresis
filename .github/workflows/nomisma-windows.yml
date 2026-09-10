@@ -1,0 +1,166 @@
+name: Nomisma Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Installer version (major.minor.patch)
+        required: true
+        default: "1.0.0"
+        type: string
+  push:
+    branches: ["**"]
+    tags: ["nomisma-v*"]
+    paths:
+      - "nomisma/**"
+      - ".github/workflows/nomisma-windows.yml"
+  pull_request:
+    paths:
+      - "nomisma/**"
+      - ".github/workflows/nomisma-windows.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nomisma-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build and verify Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: nomisma
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      ALPACA_API_KEY: ""
+      ALPACA_SECRET_KEY: ""
+      FMP_API_KEY: ""
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.7"
+          architecture: x64
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+          dotnet-quality: ga
+
+      - name: Set version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          BUILD_REF: ${{ github.ref }}
+        run: |
+          $version = if ($env:BUILD_REF.StartsWith('refs/tags/nomisma-v')) {
+            $env:BUILD_REF.Substring('refs/tags/nomisma-v'.Length)
+          } elseif ($env:REQUESTED_VERSION) { $env:REQUESTED_VERSION } else { '1.0.0' }
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'Use a major.minor.patch version, such as 1.0.0.'
+          }
+          "NOMISMA_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install build and test prerequisites
+        run: |
+          python -m pip install --disable-pip-version-check tzdata==2026.3
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install the test timezone database.' }
+          choco install nsis --version=3.12.0 -y --no-progress --limit-output
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install NSIS.' }
+          & tools/ensure_webview2.ps1
+
+      - name: Run Python tests
+        run: |
+          python -B -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Python tests failed.' }
+
+      - name: Test the Windows native bridge
+        run: |
+          node --test desktop/windows/bridge.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native bridge tests failed.' }
+
+      - name: Build installer and portable application
+        run: |
+          python -B tools/build_windows.py --version $env:NOMISMA_VERSION --output dist/windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed.' }
+
+      - name: Verify installation, native window, and uninstallation
+        run: |
+          python -B tools/check_windows.py --artifacts dist/windows --output "$env:RUNNER_TEMP/NomismaCheck"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows desktop verification failed.' }
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nomisma-windows-verification
+          path: ${{ runner.temp }}/NomismaCheck/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload Windows downloads
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Nomisma-Windows-x64
+          path: |
+            nomisma/dist/windows/Nomisma-*-win-x64-setup.exe
+            nomisma/dist/windows/Nomisma-*-win-x64-portable.zip
+            nomisma/dist/windows/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  release:
+    name: Publish tagged Windows downloads
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/nomisma-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Nomisma-Windows-x64
+          path: downloads
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        working-directory: downloads
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS.txt
+          cat > "$RUNNER_TEMP/nomisma-release.md" <<'NOTES'
+          Download the **win-x64-setup.exe** installer for Windows 11 Pro on an Intel or AMD 64-bit computer. The portable ZIP is available if you prefer to extract and run Nomisma.exe.
+
+          Python and .NET are included. Microsoft WebView2 Runtime is also required; Windows 11 normally includes it. The app provides Microsoft's download link when it is missing.
+
+          This build is unsigned, so Windows may show an unknown-publisher warning. Your credentials and research data are stored in your Windows user profile, outside the installation folder. Uninstalling preserves them.
+
+          The build passed Python tests, package checksums, native window and bridge checks, server shutdown checks, installation, and data-preserving uninstallation on GitHub's Windows runner. No API keys or personal research data are included.
+          NOTES
+          assets=(Nomisma-*-win-x64-setup.exe Nomisma-*-win-x64-portable.zip SHA256SUMS.txt)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag \
+              --title "Nomisma ${RELEASE_TAG#nomisma-v} for Windows" \
+              --notes-file "$RUNNER_TEMP/nomisma-release.md"
+          fi

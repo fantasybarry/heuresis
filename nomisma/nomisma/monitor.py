@@ -13,10 +13,11 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .live_data import live_provider_status, load_live_seed, stream_live
-from .monitor_metrics import DEFAULT_MONITOR_CONFIG, build_rows, demo_bundle, validate_monitor_config
+from .monitor_metrics import DEFAULT_MONITOR_CONFIG, _minutes, build_rows, demo_bundle, validate_monitor_config
 
 LOGGER = logging.getLogger("nomisma.monitor")
 LEVELS = {"Watch": 0, "Buy": 1, "Strong buy": 2}
+OBSERVATION_BASIS = "Observed completed-minute prices relative to the alert's completed-minute close. These are not simulated executions or investment returns; fees, spread and slippage are not included."
 
 
 def timestamp(value):
@@ -53,6 +54,19 @@ class LiveMonitor:
                        "error": None, "source": self.config["source"], "feed": None, "updated_at": None,
                        "session": None, "warnings": []}
         self.tracker = self.store.get("monitor_alert_tracker", {})
+        # Earlier versions did not include the feed in tracker keys. Preserve
+        # their deduplication only when a saved alert identifies that feed.
+        legacy = {key: state for key, state in self.tracker.items() if key.count(":") == 2}
+        if legacy:
+            for alert in self.store.monitor_alerts(limit=500):
+                market_time = timestamp(alert.get("market_time"))
+                if market_time is None or not alert.get("feed"):
+                    continue
+                day = market_time.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+                old_key = "%s:%s:%s" % (alert.get("source"), alert.get("symbol"), day)
+                if old_key in legacy:
+                    new_key = "%s:%s:%s:%s" % (alert.get("source"), alert["feed"], alert.get("symbol"), day)
+                    self.tracker.setdefault(new_key, legacy.pop(old_key))
 
     def save_config(self, payload):
         with self.lock:
@@ -136,6 +150,7 @@ class LiveMonitor:
             self.bundle = bundle
             self.status.update(source=bundle["source"], feed=bundle["feed"], session=bundle["session"],
                                warnings=list(bundle.get("warnings", [])), updated_at=bundle.get("as_of"), error=None)
+            self._refresh_outcomes()
             self.dirty = True
             return True
 
@@ -240,6 +255,7 @@ class LiveMonitor:
                         override = self.store.get("monitor_float_overrides", {}).get(current["symbol"])
                         current["float"] = override or fresh.get("float")
                     self.dirty = True
+                    self._refresh_outcomes()
             except Exception as exc:
                 if stop.is_set() or generation != self.generation:
                     return
@@ -262,6 +278,11 @@ class LiveMonitor:
     def _on_event(self, event, config, generation, stop):
         with self.lock:
             if not self._active(generation, stop) or not self.bundle or not isinstance(event, dict):
+                return
+            if event.get("T") == "nomisma_subscription":
+                self.status["channel_subscriptions"] = {key: event.get(key) for key in
+                                                        ("statuses", "lulds", "required", "checked_at", "message")}
+                self.dirty = True
                 return
             symbol = event.get("S")
             asset = next((item for item in self.bundle["assets"] if item["symbol"] == symbol), None)
@@ -312,6 +333,12 @@ class LiveMonitor:
                 snapshot["dailyBar"] = dict(event)
                 snapshot["_daily_received_at"] = now.isoformat()
                 snapshot["_daily_stream_version"] = time.monotonic()
+            elif kind in ("s", "l"):
+                key = "tradingStatus" if kind == "s" else "priceBands"
+                previous = timestamp(snapshot.get(key, {}).get("t"))
+                if previous and stamp < previous:
+                    return
+                snapshot[key] = dict(event)
             elif kind in ("c", "x"):
                 current = snapshot.get("latestTrade", {})
                 canceled = event.get("oi") if kind == "c" else event.get("i")
@@ -321,6 +348,8 @@ class LiveMonitor:
                 return
             self.status["updated_at"] = now.isoformat()
             self.dirty = True
+            if kind in ("b", "u"):
+                self._refresh_outcomes()
             if kind == "b" and advancing_bar and stamp + timedelta(minutes=1) <= now:
                 # Replacements and duplicate bars may refresh display, but the
                 # persisted signal_bar_at gate prevents repeated notifications.
@@ -344,6 +373,9 @@ class LiveMonitor:
                 row["alert_eligible"] = False
                 row["signal"] = "Watch"
                 row["blockers"] = list(row.get("blockers", [])) + ["Alerts paused: monitor is not connected."]
+                row["eligibility"].update(eligible=False, primary_blocker="Alerts paused: monitor is not connected.")
+        for row in rows:
+            self._confirmation(row, self.config)
         self.rows = rows
         self.computed_at = time.monotonic()
         self.dirty = False
@@ -355,7 +387,7 @@ class LiveMonitor:
             bar_time = timestamp(bar)
             if bar_time is None:
                 continue
-            key = "%s:%s:%s" % (row["source"], row["symbol"], row["session_date"])
+            key = self._tracker_key(row)
             previous = self.tracker.get(key, {})
             last = timestamp(previous.get("bar"))
             if last and bar_time <= last:
@@ -379,10 +411,17 @@ class LiveMonitor:
             rearmed = state.get("armed", True) and elapsed >= config["cooldown_seconds"]
             if confirmed_rank and (upgrade or rearmed):
                 confirmed_level = "Strong buy" if confirmed_rank == 2 else "Buy"
+                self._confirmation(row, config, state)
                 alert = {"id": uuid.uuid4().hex, "symbol": row["symbol"], "level": confirmed_level, "source": row["source"],
                          "feed": row["feed"], "created_at": utcnow().isoformat(), "market_time": bar,
                          "price": row.get("price"), "score": row.get("signal_score"),
                          "reasons": row.get("reasons", []), "acknowledged": False}
+                reference = next((item.get("close") for item in row.get("chart", []) if timestamp(item.get("t")) == bar_time), None)
+                session = copy.deepcopy(self.bundle.get("session", {})) if self.bundle else {}
+                alert.update(schema_version=1, session_date=row["session_date"], config=copy.deepcopy(config),
+                             snapshot=copy.deepcopy(row), session=session, reference_price=reference,
+                             reference_at=(bar_time + timedelta(minutes=1)).isoformat(), observation_basis=OBSERVATION_BASIS)
+                alert["outcomes"] = self._observations(alert, self.bundle)
                 state.update(last_alert_market_time=bar, last_alert_rank=confirmed_rank, armed=False)
                 updated = dict(self.tracker, **{key: state})
                 self.store.save_monitor_alert(alert, self._trim_tracker(updated))
@@ -390,9 +429,108 @@ class LiveMonitor:
             else:
                 self.tracker[key] = state
             changed = True
+            self._confirmation(row, config)
         if changed:
             self.tracker = self._trim_tracker(self.tracker)
             self.store.set("monitor_alert_tracker", self.tracker)
+
+    @staticmethod
+    def _tracker_key(row):
+        return "%s:%s:%s:%s" % (row["source"], row["feed"], row["symbol"], row["session_date"])
+
+    def _confirmation(self, row, config, state=None):
+        state = state if state is not None else self.tracker.get(self._tracker_key(row), {})
+        current_bar = timestamp(row.get("signal_bar_at"))
+        matching = current_bar is not None and timestamp(state.get("bar")) == current_bar
+        enabled = row.get("alert_eligible") and config["alerts_enabled"]
+        buy = state.get("buy_streak", 0) if matching and enabled else 0
+        strong = state.get("strong_streak", 0) if matching and enabled else 0
+        level = row.get("signal", "Watch")
+        bars = strong if level == "Strong buy" else buy if level == "Buy" else 0
+        last_alert = timestamp(state.get("last_alert_market_time"))
+        cooldown = max(0, config["cooldown_seconds"] - (current_bar - last_alert).total_seconds()) if current_bar and last_alert else 0
+        row["confirmation"] = {"buy_bars": buy, "strong_buy_bars": strong, "required": config["confirmation_bars"],
+                               "bars": min(bars, config["confirmation_bars"]), "level": level,
+                               "confirmed": bars >= config["confirmation_bars"], "cooldown_remaining_seconds": cooldown}
+
+    @staticmethod
+    def _observations(alert, bundle):
+        """Only complete, contiguous future windows from matching provenance."""
+        old = alert.get("outcomes", {})
+        session = alert.get("session") or {}
+        reference_at = timestamp(alert.get("reference_at"))
+        reference = alert.get("reference_price")
+        valid_reference = (reference_at is not None and type(reference) in (int, float)
+                           and math.isfinite(reference) and reference > 0)
+        session_open, session_close = timestamp(session.get("open")), timestamp(session.get("close"))
+        now = (timestamp(bundle.get("as_of")) if bundle and bundle.get("source") == "demo" else utcnow())
+        same = bool(bundle and bundle.get("source") == alert.get("source") and bundle.get("feed") == alert.get("feed")
+                    and bundle.get("session", {}).get("date") == alert.get("session_date"))
+        asset = next((item for item in bundle.get("assets", []) if item.get("symbol") == alert.get("symbol")), None) if same else None
+        minutes, _ = _minutes(asset.get("minutes"), session_open, session_close, now) if asset and now else ([], False)
+        by_time = {bar["t"]: bar for bar in minutes}
+        result = {}
+        for duration in (5, 15, 30):
+            key = str(duration)
+            target = reference_at + timedelta(minutes=duration) if reference_at else None
+            outcome = {"status": "pending", "reason": "Waiting for the complete observation window.",
+                       "target_at": target.isoformat() if target else None, "source": alert.get("source"), "feed": alert.get("feed"),
+                       "close_change_pct": None, "adverse_excursion_pct": None, "end_close": None, "observed_at": None}
+            if not valid_reference or session_open is None or session_close is None:
+                outcome.update(status="unavailable", reason="This alert has no complete original price/session evidence; older alerts cannot be reconstructed.")
+            elif target > session_close:
+                outcome.update(status="unavailable", reason="The observation window extends beyond the regular session close.")
+            elif not same or asset is None:
+                # Preserve already observed results when looking at a different
+                # symbol, feed, or session. Never mix providers or sessions.
+                if old.get(key, {}).get("status") == "observed":
+                    outcome = old[key]
+                elif alert.get("source") == "demo":
+                    outcome.update(reason="Resume the matching synthetic session and symbol to collect this observation.")
+                elif now and now >= target:
+                    outcome.update(status="unavailable", reason="Matching symbol, source, feed and session minute history is not loaded.")
+                else:
+                    outcome.update(reason="Matching symbol, source, feed and session minute history is not loaded yet.")
+            elif now is None or now < target:
+                pass
+            else:
+                window = [by_time.get(reference_at + timedelta(minutes=index)) for index in range(duration)]
+                if any(bar is None for bar in window):
+                    outcome.update(status="unavailable", reason="One or more completed minutes are missing from the observation window; history reconciliation may repair it.")
+                else:
+                    end_close = window[-1]["close"]
+                    low = min(bar["low"] for bar in window)
+                    outcome.update(status="observed", reason=None, end_close=end_close,
+                                   close_change_pct=(end_close / reference - 1) * 100,
+                                   adverse_excursion_pct=min(0, (low / reference - 1) * 100),
+                                   observed_at=target.isoformat())
+            result[key] = outcome
+        return result
+
+    def _refresh_outcomes(self):
+        if self.bundle is None:
+            return
+        alerts = self.store.monitor_session_alerts(self.bundle["source"], self.bundle["feed"], self.bundle["session"]["date"])
+        for alert in alerts:
+            outcomes = self._observations(alert, self.bundle)
+            if outcomes != alert.get("outcomes"):
+                self.store.update_monitor_outcomes(alert["id"], outcomes)
+
+    def refresh_outcomes(self):
+        with self.lock:
+            self._refresh_outcomes()
+
+    def alert_detail(self, identifier):
+        with self.lock:
+            alert = self.store.monitor_alert(identifier)
+            if alert is None:
+                return None
+            outcomes = self._observations(alert, self.bundle)
+            if outcomes != alert.get("outcomes"):
+                self.store.update_monitor_outcomes(identifier, outcomes)
+                alert["outcomes"] = outcomes
+            alert.setdefault("observation_basis", OBSERVATION_BASIS)
+            return alert
 
     @staticmethod
     def _trim_tracker(tracker):
