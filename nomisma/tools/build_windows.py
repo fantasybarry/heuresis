@@ -283,6 +283,19 @@ def tool_path(value: str | None, name: str) -> str:
     return found
 
 
+def compile_installer(makensis: str, version: str, application: Path, setup: Path,
+                      uninstall_list: Path) -> None:
+    # Join source paths on the build host. Windows makensis does not recognize
+    # the mixed backslash/forward-slash wildcard previously made by the script.
+    defines = {"APP_VERSION": version, "APP_FILES_GLOB": str(application / "*"),
+               "APP_ID_FILE": str(application / ".nomisma-install-id"),
+               "OUTPUT_FILE": str(setup), "UNINSTALL_FILES": str(uninstall_list),
+               "APP_ICON": str(PROJECT / "desktop/windows/Nomisma.ico")}
+    prefix = "/D" if os.name == "nt" else "-D"
+    run(makensis, *(f"{prefix}{key}={value}" for key, value in defines.items()),
+        PROJECT / "desktop/windows/installer.nsi")
+
+
 def build(args: argparse.Namespace) -> list[Path]:
     dotnet = tool_path(args.dotnet, "dotnet")
     makensis = tool_path(args.makensis, "makensis")
@@ -332,12 +345,7 @@ def build(args: argparse.Namespace) -> list[Path]:
         uninstall_list = work / "uninstall-files.nsh"
         write_uninstall_list(files, uninstall_list)
         setup = work / f"{stem}-setup.exe"
-        defines = {"APP_VERSION": args.version, "APP_FILES": str(application),
-                   "OUTPUT_FILE": str(setup), "UNINSTALL_FILES": str(uninstall_list),
-                   "APP_ICON": str(PROJECT / "desktop/windows/Nomisma.ico")}
-        prefix = "/D" if os.name == "nt" else "-D"
-        run(makensis, *(f"{prefix}{key}={value}" for key, value in defines.items()),
-            PROJECT / "desktop/windows/installer.nsi")
+        compile_installer(makensis, args.version, application, setup, uninstall_list)
         require_pe(setup, machine=0x14C)  # NSIS bootstrapper is 32-bit; payload is x64.
         archive = work / f"{stem}-portable.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zipped:

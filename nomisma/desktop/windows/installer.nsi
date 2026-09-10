@@ -104,8 +104,8 @@ Section "Nomisma (required)" Core
   StrCpy $INSTDIR "$LOCALAPPDATA\Programs\Nomisma"
   SetOutPath "$INSTDIR"
   SetOverwrite on
-  File /r /x ".nomisma-install-id" "${APP_FILES}/*"
-  File "${APP_FILES}/.nomisma-install-id"
+  File /r /x ".nomisma-install-id" "${APP_FILES_GLOB}"
+  File "${APP_ID_FILE}"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\Nomisma"
   CreateShortcut "$SMPROGRAMS\Nomisma\Nomisma.lnk" "$INSTDIR\Nomisma.exe"

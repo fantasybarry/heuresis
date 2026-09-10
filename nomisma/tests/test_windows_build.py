@@ -12,6 +12,25 @@ from tools import build_windows
 
 
 class WindowsBuildTests(unittest.TestCase):
+    def test_real_installer_compiles_payload_paths_with_spaces(self):
+        try:
+            makensis = build_windows.tool_path(None, "makensis")
+        except RuntimeError:
+            self.skipTest("NSIS is not installed; the Windows CI runner installs it before these tests")
+        with tempfile.TemporaryDirectory(prefix="nomisma installer test ") as folder:
+            root = Path(folder)
+            application = root / "Application files"
+            (application / "resources/backend").mkdir(parents=True)
+            (application / "Nomisma.exe").write_bytes(b"compile-only payload fixture")
+            (application / "resources/backend/host.py").write_text("# nested payload fixture\n")
+            (application / ".nomisma-install-id").write_text(build_windows.APP_ID)
+            uninstall_list = root / "uninstall files.nsh"
+            build_windows.write_uninstall_list(
+                ["Nomisma.exe", "resources/backend/host.py", ".nomisma-install-id"], uninstall_list)
+            setup = root / "Test setup.exe"
+            build_windows.compile_installer(makensis, "1.0.1", application, setup, uninstall_list)
+            build_windows.require_pe(setup, machine=0x14C)
+
     def test_backend_allowlist_excludes_secrets_databases_mac_sources_and_caches(self):
         with tempfile.TemporaryDirectory() as folder:
             project = Path(folder) / "project"
