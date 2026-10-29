@@ -5,3 +5,4 @@ __pycache__/
 .env
 nomisma/data/
 artifacts/
+.sdl-mcp/*.lbug
