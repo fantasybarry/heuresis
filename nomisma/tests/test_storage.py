@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from nomisma.engine import screen
 from nomisma.providers import demo_dataset
-from nomisma.server import default_settings
+from nomisma.server import Application, default_settings
 from nomisma.storage import Store
 
 
@@ -34,6 +34,45 @@ class StorageTests(unittest.TestCase):
         for kwargs in ({"limit": 0}, {"limit": True}, {"offset": -1}, {"limit": 501}):
             with self.assertRaises(ValueError):
                 self.store.history(**kwargs)
+
+    def test_source_scoped_alert_pagination_keeps_default_journal_and_evidence(self):
+        for source in ("alpaca", "demo"):
+            for number in range(3):
+                self.store.save_monitor_alert({"id": "%s-%s" % (source, number),
+                    "source": source, "feed": "iex" if source == "alpaca" else "synthetic",
+                    "created_at": "2026-09-08T15:0%s:00+00:00" % number,
+                    "snapshot": {"price": 2.5}, "config": {"source": source}, "session": {"date": "2026-09-08"}}, {})
+        self.assertEqual([row["id"] for row in self.store.monitor_alerts(limit=1, offset=1, source="alpaca")], ["alpaca-1"])
+        self.assertEqual({row["source"] for row in self.store.monitor_alerts()}, {"alpaca", "demo"})
+        self.assertNotIn("snapshot", self.store.monitor_alerts(source="alpaca")[0])
+        self.assertEqual(self.store.monitor_alerts(source="alpaca", include_evidence=True)[0]["snapshot"], {"price": 2.5})
+        self.assertEqual(self.store.monitor_alerts_total(), 6)
+
+    def test_source_scoped_acknowledgment_does_not_mark_other_source_or_change_tracker(self):
+        for source in ("alpaca", "demo"):
+            self.store.save_monitor_alert({"id": source, "source": source,
+                "created_at": "2026-09-08T15:00:00+00:00", "snapshot": {"price": 2.5}}, {"saved": {"bar": "unchanged"}})
+        response = self.store.acknowledge_monitor_alerts(all_alerts=True, source="alpaca")
+        self.assertEqual([row["id"] for row in response], ["alpaca"])
+        self.assertTrue(self.store.monitor_alert("alpaca")["acknowledged"])
+        self.assertFalse(self.store.monitor_alert("demo")["acknowledged"])
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.store.acknowledge_monitor_alerts("demo", source="alpaca")
+        self.assertFalse(self.store.monitor_alert("demo")["acknowledged"])
+        self.assertEqual(self.store.get("monitor_alert_tracker"), {"saved": {"bar": "unchanged"}})
+        self.assertEqual(self.store.monitor_alert("demo")["snapshot"], {"price": 2.5})
+        self.store.acknowledge_monitor_alerts(all_alerts=True)
+        self.assertTrue(all(row["acknowledged"] for row in self.store.monitor_alerts()))
+
+    def test_invalid_alert_source_is_rejected_before_read_or_acknowledgment(self):
+        self.store.save_monitor_alert({"id": "demo", "source": "demo", "created_at": "2026-09-08T15:00:00+00:00"}, {})
+        for source in ("csv", "all", "ALPACA", "", [], {}, True):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ValueError, "source"):
+                    self.store.monitor_alerts(source=source)
+                with self.assertRaisesRegex(ValueError, "source"):
+                    self.store.acknowledge_monitor_alerts(all_alerts=True, source=source)
+        self.assertFalse(self.store.monitor_alert("demo")["acknowledged"])
 
     def test_backup_restore_round_trip_keeps_safety_copy_and_rebuilds_summaries(self):
         self.store.set("settings", default_settings())
@@ -104,6 +143,62 @@ class StorageTests(unittest.TestCase):
         for connection in connections:
             with self.assertRaises(sqlite3.ProgrammingError):
                 connection.execute("SELECT 1")
+
+    def test_discovery_schedule_result_and_retry_state_restore_and_validate(self):
+        from nomisma.research import discover
+        app = Application(self.temp.name, seed=False)
+        app.save_discovery_settings({"config": {"source": "demo", "min_price": 1},
+                                     "schedule": {"enabled": True, "time": "09:15"}})
+        with patch("nomisma.server.threading.Thread.start"):
+            initial = app.start_research("discovery", {}, scheduled_date="2026-09-08")
+        job = app.research_jobs[initial["id"]]
+        app._finish_research(job, result=discover(app.discovery_settings()["config"]))
+        content = self.store.backup()
+        self.store.set("discovery_settings", {})
+        self.store.restore_backup(content)
+        self.assertEqual(self.store.get("discovery_settings")["schedule"]["time"], "09:15")
+        state = self.store.get("discovery_state")
+        self.assertEqual(state["latest"]["id"], job["id"])
+        self.assertEqual(state["last_success_date"], "2026-09-08")
+        self.assertTrue(state["latest"]["result"]["rows"])
+        invalid_states = [dict(state, retry_after="tomorrow"), dict(state, last_success_date="bad")]
+        bad_result = json.loads(json.dumps(state))
+        bad_result["latest"]["result"]["rows"][0]["price"] = -1
+        invalid_states.append(bad_result)
+        bad_count = json.loads(json.dumps(state))
+        bad_count["latest"]["result"]["coverage"]["returned"] = 10000
+        invalid_states.append(bad_count)
+        for invalid in invalid_states:
+            candidate = self.edit_backup(content, "UPDATE state SET value=? WHERE key='discovery_state'", (json.dumps(invalid),))
+            with self.subTest(invalid=invalid.get("retry_after")), self.assertRaises(ValueError):
+                self.store.restore_backup(candidate)
+            self.assertEqual(self.store.get("discovery_state"), state)
+        candidate = self.edit_backup(content, "UPDATE state SET value=? WHERE key='discovery_settings'",
+                                     (json.dumps({"schedule": {"enabled": "yes"}}),))
+        with self.assertRaises(ValueError):
+            self.store.restore_backup(candidate)
+
+    def test_discovery_backup_preserves_unavailable_volume_and_screening_metrics(self):
+        from nomisma.research import discover
+        app = Application(self.temp.name, seed=False)
+        with patch("nomisma.server.threading.Thread.start"):
+            initial = app.start_research("discovery", {})
+        result = discover(app.discovery_settings()["config"])
+        row = result["rows"][0]
+        row.update(day_volume=None, volume_at=None, day_volume_fresh=False, volume_basis="unavailable",
+                   avg_volume_3m=None, avg_daily_volume=100000, beta=-0.4, spread=None, atr=0.5)
+        app._finish_research(app.research_jobs[initial["id"]], result=result)
+        content = self.store.backup()
+        self.store.restore_backup(content)
+        state = self.store.get("discovery_state")
+        self.assertEqual(state["latest"]["result"]["rows"][0], row)
+        for update in ({"volume_basis": "provider_daily"}, {"day_volume_fresh": True},
+                       {"avg_daily_volume": -1}, {"spread": "unknown"}):
+            bad = json.loads(json.dumps(state))
+            bad["latest"]["result"]["rows"][0].update(update)
+            candidate = self.edit_backup(content, "UPDATE state SET value=? WHERE key='discovery_state'", (json.dumps(bad),))
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                self.store.restore_backup(candidate)
 
 
 if __name__ == "__main__":

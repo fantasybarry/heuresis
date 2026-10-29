@@ -22,7 +22,8 @@ def load_environment(path):
             raise ValueError("Invalid .env entry at line %s. Use KEY=value." % number)
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
-        if key not in {"ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ALPACA_FEED", "ALPACA_PAPER", "FMP_API_KEY"}:
+        if key not in {"ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ALPACA_FEED", "ALPACA_PAPER", "FMP_API_KEY", "MASSIVE_API_KEY",
+                       "NOMISMA_POOL", "NOMISMA_POOL_TOKEN"}:
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
@@ -33,6 +34,7 @@ def main():
     parser = argparse.ArgumentParser(description="Nomisma — intraday penny-stock momentum and daily equity screening")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=PROJECT / "data")
+    parser.add_argument("--pool", action="store_true", help="Serve the shared Alpaca stream to workstations on --port")
     parser.add_argument("--scan", action="store_true", help="Run one screen with your saved settings and exit")
     parser.add_argument("--source", choices=["demo", "alpaca", "csv"], help="Override the source for a one-off --scan")
     args = parser.parse_args()
@@ -43,6 +45,10 @@ def main():
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     try:
         load_environment(PROJECT / ".env")
+        if args.pool:
+            from nomisma.pool import serve_pool
+            serve_pool(args.port)
+            return 0
         from nomisma.server import Application, serve
         app = Application(args.data_dir, seed=not args.scan)
         if args.scan:

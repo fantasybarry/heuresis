@@ -1,0 +1,202 @@
+{
+  "repos": [
+    {
+      "repoId": "heuresis",
+      "rootPath": "/Users/barry/heuresis",
+      "ignore": [
+        "**/.git/**",
+        "**/dist/**",
+        "**/dist-*/**",
+        "**/build/**",
+        "**/out/**",
+        "**/target/**",
+        "**/coverage/**",
+        "**/*.min.js",
+        "**/*.min.css",
+        "**/node_modules/**",
+        "**/vendor/**",
+        "**/.pnp.*",
+        "**/.yarn/**",
+        "**/.next/**",
+        "**/.nuxt/**",
+        "**/.svelte-kit/**",
+        "**/.output/**",
+        "**/__pycache__/**",
+        "**/.pytest_cache/**",
+        "**/*.pyc",
+        "**/.venv/**",
+        "**/venv/**",
+        "**/.tox/**",
+        "**/.mypy_cache/**",
+        "**/.tmp/**",
+        "**/tmp/**",
+        "**/.claude/**",
+        "**/.codex/**",
+        "**/.cursor/**",
+        "**/.aider*/**",
+        "**/.windsurf/**",
+        "**/.continue/**",
+        "**/.sdl-memory/**",
+        "**/.sisyphus/**",
+        "**/.DS_Store",
+        "**/.DS_Store/**",
+        "**/*.py[cod]",
+        "**/.env",
+        "**/.env/**",
+        "**/nomisma/data/**",
+        "**/artifacts/**"
+      ],
+      "languages": [
+        "cs",
+        "js",
+        "powershell",
+        "py",
+        "swift",
+        "cpp"
+      ],
+      "maxFileBytes": 2000000,
+      "includeNodeModulesTypes": true,
+      "packageJsonPath": null,
+      "tsconfigPath": null,
+      "workspaceGlobs": null
+    }
+  ],
+  "performanceTier": "auto",
+  "dbPath": "/Users/barry/heuresis/.sdl-mcp/sdlmcp.sqlite",
+  "graphDatabase": {
+    "path": "/Users/barry/heuresis/.sdl-mcp/sdl-mcp-graph.recovered-provider-20260924.lbug"
+  },
+  "policy": {
+    "maxWindowLines": 180,
+    "maxWindowTokens": 1400,
+    "requireIdentifiers": true,
+    "allowBreakGlass": false,
+    "defaultDenyRaw": true
+  },
+  "redaction": {
+    "enabled": true,
+    "includeDefaults": true,
+    "patterns": []
+  },
+  "indexing": {
+    "pipeline": "auto",
+    "providerFirst": {
+      "activation": "shadowDb",
+      "readyState": "graphPlusAlgorithms",
+      "stagingFormat": "parquet",
+      "maxLegacyFallbackFiles": 1000000,
+      "maxSemanticEligibleFallbackFiles": 0,
+      "lsp": {
+        "mode": "primaryWithCaps",
+        "workspaceSymbolLimit": 5000,
+        "documentSymbolFileLimit": 500,
+        "documentSymbolTimeoutMs": 10000,
+        "documentSymbolFailureLimit": 20,
+        "documentSymbolCollectionTimeoutMs": 120000,
+        "referenceCandidateLimit": 200,
+        "diagnosticsLimit": 5000,
+        "diagnosticsTimeoutMs": 5000
+      }
+    },
+    "watchProvider": "auto",
+    "concurrency": 8,
+    "enableFileWatching": true,
+    "maxWatchedFiles": 25000,
+    "engine": "rust",
+    "watchDebounceMs": 300,
+    "pass2Concurrency": 4,
+    "algorithmRefresh": {
+      "enabled": true,
+      "pageRank": {
+        "enabled": true
+      },
+      "kCore": {
+        "enabled": true
+      },
+      "louvain": {
+        "enabled": true,
+        "maxCallEdges": 10000
+      },
+      "workerTimeoutMs": 120000
+    }
+  },
+  "liveIndex": {
+    "enabled": true,
+    "debounceMs": 75,
+    "idleCheckpointMs": 15000,
+    "maxDraftFiles": 200,
+    "reconcileConcurrency": 1,
+    "clusterRefreshThreshold": 25
+  },
+  "slice": {
+    "defaultMaxCards": 60,
+    "defaultMaxTokens": 12000,
+    "edgeWeights": {
+      "call": 1,
+      "import": 0.6,
+      "config": 0.8,
+      "implements": 0.9
+    }
+  },
+  "prefetch": {
+    "enabled": true,
+    "maxBudgetPercent": 20,
+    "warmTopN": 0,
+    "policy": {
+      "enabled": true,
+      "mode": "safe",
+      "minSamples": 20,
+      "suppressionWasteRate": 0.8,
+      "boostHitRate": 0.35,
+      "retentionDays": 14,
+      "maxPriorityBoost": 25,
+      "maxBudgetTrimPercent": 50
+    }
+  },
+  "tracing": {
+    "enabled": true,
+    "serviceName": "sdl-mcp",
+    "exporterType": "console",
+    "sampleRate": 1
+  },
+  "observability": {
+    "enabled": true,
+    "sampleIntervalMs": 2000,
+    "retentionShortMinutes": 15,
+    "retentionLongHours": 24,
+    "pprMetricsEnabled": true,
+    "packedStatsEnabled": true,
+    "scipIngestMetrics": true,
+    "beamExplainCapacity": 128,
+    "beamExplainEntriesPerSlice": 512,
+    "sseHeartbeatMs": 15000,
+    "sseMaxStreamMs": 3600000
+  },
+  "parallelScorer": {
+    "enabled": true
+  },
+  "httpAuth": {
+    "enabled": true,
+    "token": "-twBcSIcYaiKlStLiPYi-IQFJDF90bShSIBXDNRnxKU",
+    "rateLimit": {
+      "bucketSize": 30,
+      "refillPerSec": 0.5
+    }
+  },
+  "http": {
+    "allowRemote": false
+  },
+  "codeMode": {
+    "enabled": true,
+    "exclusive": true,
+    "maxWorkflowSteps": 20,
+    "maxWorkflowTokens": 50000,
+    "maxWorkflowDurationMs": 60000,
+    "ladderValidation": "warn",
+    "etagCaching": true
+  },
+  "semantic": {
+    "enabled": false,
+    "generateSummaries": false
+  }
+}

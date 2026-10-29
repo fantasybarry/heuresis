@@ -5,15 +5,19 @@ import csv
 import io
 import logging
 import math
+import os
 import re
 import threading
 import time
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as daytime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .live_data import live_provider_status, load_live_seed, stream_live
-from .monitor_metrics import DEFAULT_MONITOR_CONFIG, _minutes, build_rows, demo_bundle, validate_monitor_config
+from .live_data import LiveSubscriptionLimit, live_provider_status, load_live_seed, stream_live
+from .monitor_metrics import MAX_MONITOR_SYMBOLS, DEFAULT_MONITOR_CONFIG, _CLOCK_SKEW, _minutes, build_rows, demo_bundle, validate_monitor_config
+from .planner import freeze_plan
+from .pool import stream_pool
+from .trade_plan import default_plan_settings
 
 LOGGER = logging.getLogger("nomisma.monitor")
 LEVELS = {"Watch": 0, "Buy": 1, "Strong buy": 2}
@@ -41,6 +45,8 @@ class LiveMonitor:
     def __init__(self, store):
         self.store = store
         self.lock = threading.RLock()
+        self.reload_lock = threading.Lock()
+        self.refresh_status = {"state": "idle", "started_at": None, "completed_at": None, "error": None}
         self.stop_event = threading.Event()
         self.generation = 0
         self.config = validate_monitor_config(store.get("monitor_config", DEFAULT_MONITOR_CONFIG))
@@ -75,6 +81,7 @@ class LiveMonitor:
             config = validate_monitor_config(payload, self.config)
             self.store.set("monitor_config", config)
             if config != self.config:
+                self.refresh_status = {"state": "idle", "started_at": None, "completed_at": None, "error": None}
                 self.bundle = None
                 self.rows = []
                 self.minute_versions = {}
@@ -95,6 +102,7 @@ class LiveMonitor:
             self.store.set("monitor_config", config)
             self.config = config
             self.generation += 1
+            self.refresh_status = {"state": "idle", "started_at": None, "completed_at": None, "error": None}
             generation = self.generation
             stop = threading.Event()
             self.stop_event = stop
@@ -114,6 +122,8 @@ class LiveMonitor:
             self.stop_event.set()
             self.generation += 1
             self.status.update(running=False, connection="stopped", message="Monitoring stopped.", error=None)
+            if self.refresh_status["state"] == "loading":
+                self.refresh_status.update(state="cancelled", completed_at=utcnow().isoformat())
             self.dirty = True
         return self.snapshot()
 
@@ -122,6 +132,8 @@ class LiveMonitor:
             self.stop_event.set()
             self.generation += 1
             self.status.update(running=False, connection="stopped")
+            if self.refresh_status["state"] == "loading":
+                self.refresh_status.update(state="cancelled", completed_at=utcnow().isoformat())
 
     def _active(self, generation, stop):
         return generation == self.generation and not stop.is_set() and self.status["running"]
@@ -199,12 +211,16 @@ class LiveMonitor:
                         threading.Thread(target=self._reconcile, args=(config, generation, stop, epoch),
                                          name="nomisma-minute-reconcile", daemon=True).start()
 
-                stream_live(config["symbols"], lambda event: self._on_event(event, config, generation, stop), stop, on_status=on_status)
+                stream = stream_pool if os.environ.get("NOMISMA_POOL", "").strip() else stream_live
+                stream(config["symbols"], lambda event: self._on_event(event, config, generation, stop), stop, on_status=on_status)
                 if stop.is_set():
                     return
                 raise ValueError("The market stream disconnected.")
             except Exception as exc:
                 if stop.is_set() or generation != self.generation:
+                    return
+                if isinstance(exc, LiveSubscriptionLimit):
+                    self._terminal_error(generation, stop, exc)
                     return
                 attempt += 1
                 delay = min(30, 2 ** min(attempt, 5))
@@ -213,49 +229,130 @@ class LiveMonitor:
                 if stop.wait(delay):
                     return
 
+    def refresh(self):
+        """Reload the active source without restarting the stream or alert tracker."""
+        with self.lock:
+            if not self.status["running"]:
+                raise MonitorBusy("Start monitoring before refreshing provider data.")
+            if self.status["connection"] not in ("live", "demo") or self.bundle is None:
+                raise MonitorBusy("Wait for the monitor to connect before refreshing data.")
+            if self.refresh_status["state"] == "loading":
+                raise MonitorBusy("A data refresh is already running.")
+            self.refresh_status = {"state": "loading", "started_at": utcnow().isoformat(),
+                                   "completed_at": None, "error": None}
+            generation, stop, epoch = self.generation, self.stop_event, self.connection_epoch
+            worker = threading.Thread(target=self._refresh_worker,
+                                      args=(copy.deepcopy(self.config), generation, stop, epoch),
+                                      daemon=True, name="nomisma-monitor-refresh")
+            worker.start()
+        return self.snapshot()
+
+    def _refresh_worker(self, config, generation, stop, epoch):
+        try:
+            if config["source"] == "alpaca":
+                if not self._reload_seed(config, generation, stop, epoch, force=True):
+                    raise ValueError("The market connection or session changed during refresh; retry once connected.")
+            with self.lock:
+                if not self._active(generation, stop):
+                    return
+                self.dirty = True
+                self._refresh_rows()
+                self._refresh_outcomes()
+                self.refresh_status.update(state="completed", completed_at=utcnow().isoformat(), error=None)
+        except Exception:
+            with self.lock:
+                if self._active(generation, stop):
+                    # Arbitrary provider exceptions can contain request URLs.
+                    self.refresh_status.update(state="error", completed_at=utcnow().isoformat(),
+                        error="Data refresh failed. Check provider access and connection, then retry. Existing stream data was kept.")
+
+    def _reload_seed(self, config, generation, stop, epoch, force=False):
+        # Serialize explicit and periodic refreshes. Stop still returns promptly
+        # while an in-flight transport is finishing in its bounded daemon worker.
+        while not self.reload_lock.acquire(timeout=0.1):
+            with self.lock:
+                if not self._active(generation, stop) or epoch != self.connection_epoch:
+                    return False
+        try:
+            with self.lock:
+                if (not self._active(generation, stop) or self.status["connection"] != "live"
+                        or epoch != self.connection_epoch):
+                    return False
+            started = time.monotonic()
+            refreshed = load_live_seed(config["symbols"], stop_event=stop, refresh=force)
+            with self.lock:
+                if (not self._active(generation, stop) or not self.bundle
+                        or self.status["connection"] != "live" or epoch != self.connection_epoch):
+                    return False
+                if (refreshed["source"] != self.bundle["source"] or refreshed["feed"] != self.bundle["feed"]
+                        or refreshed["session"]["date"] != self.bundle["session"]["date"]):
+                    return False
+                current_assets = {asset["symbol"]: asset for asset in self.bundle["assets"]}
+                overrides = self.store.get("monitor_float_overrides", {})
+                for fresh in refreshed["assets"]:
+                    current = current_assets.get(fresh["symbol"])
+                    if current is None:
+                        continue
+                    current["bars"] = fresh["bars"]
+                    merged = {timestamp(bar["t"]): bar for bar in current["minutes"]}
+                    for bar in fresh["minutes"]:
+                        stamp = timestamp(bar["t"])
+                        if self.minute_versions.get((current["symbol"], stamp), 0) <= started:
+                            merged[stamp] = bar
+                    current["minutes"] = [merged[stamp] for stamp in sorted(merged)][-600:]
+                    for field in ("latestTrade", "latestQuote"):
+                        incoming = fresh.get("snapshot", {}).get(field) or {}
+                        existing = current.get("snapshot", {}).get(field) or {}
+                        new_time, old_time = timestamp(incoming.get("t")), timestamp(existing.get("t"))
+                        stream_version = current.get("snapshot", {}).get("_stream_versions", {}).get(field, 0)
+                        if new_time and (old_time is None or new_time > old_time) and stream_version < started:
+                            current.setdefault("snapshot", {})[field] = incoming
+                    fresh_snapshot = fresh.get("snapshot", {})
+                    current_snapshot = current.setdefault("snapshot", {})
+                    received = timestamp(fresh_snapshot.get("_received_at"))
+                    existing_received = timestamp(current_snapshot.get("_daily_received_at") or current_snapshot.get("_received_at"))
+                    if (received and (existing_received is None or received > existing_received)
+                            and current_snapshot.get("_daily_stream_version", 0) <= started):
+                        current_snapshot["dailyBar"] = fresh_snapshot.get("dailyBar")
+                        current_snapshot["_daily_received_at"] = received.isoformat()
+                    incoming_extended = fresh_snapshot.get("_extended_day")
+                    existing_extended = current_snapshot.get("_extended_day")
+                    if incoming_extended:
+                        extended_minutes = {timestamp(bar["t"]): bar for bar in (existing_extended or {}).get("minutes", [])}
+                        for bar in incoming_extended.get("minutes", []):
+                            stamp = timestamp(bar["t"])
+                            if self.minute_versions.get((current["symbol"], stamp), 0) < started:
+                                extended_minutes[stamp] = bar
+                        values = [extended_minutes[stamp] for stamp in sorted(extended_minutes)]
+                        merged_extended = dict(incoming_extended, minutes=values,
+                                               volume=math.fsum(bar["volume"] for bar in values) if values else None)
+                        if values:
+                            merged_extended["as_of"] = (timestamp(values[-1]["t"]) + timedelta(minutes=1)).isoformat()
+                        old_received = timestamp((existing_extended or {}).get("received_at"))
+                        if old_received and old_received > timestamp(incoming_extended["received_at"]):
+                            merged_extended["received_at"] = existing_extended["received_at"]
+                        current_snapshot["_extended_day"] = merged_extended
+                    override = overrides.get(current["symbol"])
+                    current["float"] = override or fresh.get("float")
+                self.bundle["benchmark_bars"] = refreshed.get("benchmark_bars", [])
+                self.dirty = True
+                self._refresh_outcomes()
+                incoming_updated = timestamp(refreshed.get("as_of"))
+                current_updated = timestamp(self.status.get("updated_at"))
+                if incoming_updated and (current_updated is None or incoming_updated > current_updated):
+                    self.status["updated_at"] = refreshed["as_of"]
+                if force:
+                    self.status["warnings"] = list(refreshed.get("warnings", []))
+                return True
+        finally:
+            self.reload_lock.release()
+
     def _reconcile(self, config, generation, stop, epoch):
         """Repair missing minute history without rolling back newer events."""
         while not stop.is_set():
-            with self.lock:
-                if not self._active(generation, stop) or self.status["connection"] != "live" or epoch != self.connection_epoch:
-                    return
-            started = time.monotonic()
             try:
-                refreshed = load_live_seed(config["symbols"], stop_event=stop)
-                with self.lock:
-                    if not self._active(generation, stop) or not self.bundle or self.status["connection"] != "live" or epoch != self.connection_epoch:
-                        return
-                    if refreshed["session"]["date"] != self.bundle["session"]["date"]:
-                        return
-                    for fresh in refreshed["assets"]:
-                        current = next((asset for asset in self.bundle["assets"] if asset["symbol"] == fresh["symbol"]), None)
-                        if current is None:
-                            continue
-                        current["bars"] = fresh["bars"]
-                        merged = {timestamp(bar["t"]): bar for bar in current["minutes"]}
-                        for bar in fresh["minutes"]:
-                            stamp = timestamp(bar["t"])
-                            if self.minute_versions.get((current["symbol"], stamp), 0) <= started:
-                                merged[stamp] = bar
-                        current["minutes"] = [merged[stamp] for stamp in sorted(merged)][-600:]
-                        for field in ("latestTrade", "latestQuote"):
-                            incoming = fresh.get("snapshot", {}).get(field) or {}
-                            existing = current.get("snapshot", {}).get(field) or {}
-                            new_time, old_time = timestamp(incoming.get("t")), timestamp(existing.get("t"))
-                            if new_time and (old_time is None or new_time > old_time):
-                                current.setdefault("snapshot", {})[field] = incoming
-                        fresh_snapshot = fresh.get("snapshot", {})
-                        current_snapshot = current.setdefault("snapshot", {})
-                        received = timestamp(fresh_snapshot.get("_received_at"))
-                        existing_received = timestamp(current_snapshot.get("_daily_received_at") or current_snapshot.get("_received_at"))
-                        if (received and (existing_received is None or received > existing_received)
-                                and current_snapshot.get("_daily_stream_version", 0) <= started):
-                            current_snapshot["dailyBar"] = fresh_snapshot.get("dailyBar")
-                            current_snapshot["_daily_received_at"] = received.isoformat()
-                        override = self.store.get("monitor_float_overrides", {}).get(current["symbol"])
-                        current["float"] = override or fresh.get("float")
-                    self.dirty = True
-                    self._refresh_outcomes()
+                if not self._reload_seed(config, generation, stop, epoch):
+                    return
             except Exception as exc:
                 if stop.is_set() or generation != self.generation:
                     return
@@ -272,6 +369,8 @@ class LiveMonitor:
             if self._active(generation, stop):
                 message = str(exc) if isinstance(exc, ValueError) else "Monitoring could not continue. Stop and restart the monitor."
                 self.status.update(running=False, connection="error", message="Monitoring needs attention.", error=message)
+                if self.refresh_status["state"] == "loading":
+                    self.refresh_status.update(state="cancelled", completed_at=utcnow().isoformat())
                 self.dirty = True
         LOGGER.warning("Monitor failed (%s)", type(exc).__name__)
 
@@ -309,9 +408,15 @@ class LiveMonitor:
                 if previous and stamp < previous:
                     return
                 snapshot[key] = dict(event)
+                if kind == "q":
+                    snapshot[key]["_received_at"] = now.isoformat()
+                snapshot.setdefault("_stream_versions", {})[key] = time.monotonic()
             elif kind in ("b", "u"):
                 session_open = timestamp(session["open"])
-                if not session_open <= stamp < session_close:
+                day = date.fromisoformat(session["date"])
+                extended_open = datetime.combine(day, daytime(4), ZoneInfo("America/New_York"))
+                extended_close = datetime.combine(day, daytime(20), ZoneInfo("America/New_York"))
+                if not extended_open <= stamp < extended_close:
                     return
                 fields = {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v", "vwap": "vw"}
                 minute = {"t": event["t"]}
@@ -323,6 +428,21 @@ class LiveMonitor:
                         return
                     minute[name] = value
                 if minute["low"] > min(minute["open"], minute["close"]) or minute["high"] < max(minute["open"], minute["close"]):
+                    return
+                if stamp.second or stamp.microsecond or stamp + timedelta(minutes=1) > now + _CLOCK_SKEW:
+                    return
+                extended = snapshot.get("_extended_day")
+                if extended is not None:
+                    day_minutes = {timestamp(bar["t"]): bar for bar in extended.get("minutes", [])}
+                    day_minutes[stamp] = minute
+                    extended["minutes"] = [day_minutes[key] for key in sorted(day_minutes)]
+                    extended["volume"] = math.fsum(bar["volume"] for bar in day_minutes.values())
+                    extended["as_of"] = (max(day_minutes) + timedelta(minutes=1)).isoformat()
+                    extended["received_at"] = now.isoformat()
+                self.minute_versions[(symbol, stamp)] = time.monotonic()
+                if not session_open <= stamp < session_close:
+                    self.status["updated_at"] = now.isoformat()
+                    self.dirty = True
                     return
                 minute_map = {timestamp(bar["t"]): bar for bar in asset.get("minutes", [])}
                 advancing_bar = not minute_map or stamp > max(minute_map)
@@ -342,19 +462,25 @@ class LiveMonitor:
             elif kind in ("c", "x"):
                 current = snapshot.get("latestTrade", {})
                 canceled = event.get("oi") if kind == "c" else event.get("i")
-                if current.get("i") == canceled:
-                    snapshot.pop("latestTrade", None)
+                if canceled is not None:
+                    # A cancellation/correction can remove the timestamp that
+                    # normally prevents REST from restoring an older trade.
+                    # Keep a separate arrival version even for missing trades.
+                    snapshot.setdefault("_stream_versions", {})["latestTrade"] = time.monotonic()
+                    if current.get("i") == canceled:
+                        snapshot.pop("latestTrade", None)
             else:
                 return
             self.status["updated_at"] = now.isoformat()
             self.dirty = True
             if kind in ("b", "u"):
                 self._refresh_outcomes()
-            if kind == "b" and advancing_bar and stamp + timedelta(minutes=1) <= now:
+            if kind == "b" and advancing_bar and stamp + timedelta(minutes=1) <= now + _CLOCK_SKEW:
                 # Replacements and duplicate bars may refresh display, but the
                 # persisted signal_bar_at gate prevents repeated notifications.
                 single = dict(self.bundle, assets=[asset])
-                rows = build_rows(single, config, now=now)
+                # A bar can arrive just before a lagging local clock reaches its end; evaluate it as completed.
+                rows = build_rows(single, config, now=max(now, stamp + timedelta(minutes=1)))
                 if self.status["connection"] == "live" and rows and timestamp(rows[0].get("signal_bar_at")) == stamp:
                     try:
                         self._evaluate_alerts(rows, config)
@@ -422,6 +548,12 @@ class LiveMonitor:
                              snapshot=copy.deepcopy(row), session=session, reference_price=reference,
                              reference_at=(bar_time + timedelta(minutes=1)).isoformat(), observation_basis=OBSERVATION_BASIS)
                 alert["outcomes"] = self._observations(alert, self.bundle)
+                try:
+                    alert["trade_plan"] = freeze_plan(alert, self.store.get("planning_settings", default_plan_settings()))
+                except Exception as exc:
+                    # A planning failure must neither invent a plan nor lose a setup alert.
+                    alert["planning_error"] = "Model analysis unavailable. The original alert evidence is preserved."
+                    LOGGER.warning("Could not analyze setup (%s)", type(exc).__name__)
                 state.update(last_alert_market_time=bar, last_alert_rank=confirmed_rank, armed=False)
                 updated = dict(self.tracker, **{key: state})
                 self.store.save_monitor_alert(alert, self._trim_tracker(updated))
@@ -537,14 +669,25 @@ class LiveMonitor:
         # Bound state while retaining recent symbol/session deduplication.
         return dict(sorted(tracker.items(), key=lambda item: item[1].get("bar", ""))[-500:])
 
-    def snapshot(self):
+    def snapshot(self, compact=False):
         with self.lock:
             if self.dirty or time.monotonic() - self.computed_at >= 1:
                 self._refresh_rows()
-            result = {"config": copy.deepcopy(self.config), "status": copy.deepcopy(self.status), "rows": copy.deepcopy(self.rows)}
-        result["alerts"] = self.store.monitor_alerts()
+            rows = ([{key: value for key, value in row.items() if key not in ("chart", "volume_history")}
+                     for row in self.rows] if compact else self.rows)
+            result = {"config": copy.deepcopy(self.config), "status": copy.deepcopy(self.status),
+                      "rows": copy.deepcopy(rows), "limits": {"max_symbols": MAX_MONITOR_SYMBOLS}}
+            result["status"]["refresh"] = copy.deepcopy(self.refresh_status)
+        result["alerts"] = self.store.monitor_alerts(source=result["config"]["source"])
         result["provider_status"] = live_provider_status()
         return result
+
+    def row_detail(self, symbol):
+        normalized = validate_monitor_config({"symbols": [symbol]}, self.config)["symbols"][0]
+        with self.lock:
+            if self.dirty or time.monotonic() - self.computed_at >= 1:
+                self._refresh_rows()
+            return copy.deepcopy(next((row for row in self.rows if row["symbol"] == normalized), None))
 
     def set_float(self, payload):
         if not isinstance(payload, dict) or set(payload) - {"symbol", "shares", "as_of"}:
@@ -583,7 +726,11 @@ def monitor_csv(snapshot):
     fields = ["symbol", "source", "feed", "session_date", "price", "price_at", "day_volume", "day_volume_at", "session_volume", "volume_at",
               "float_shares", "float_as_of", "float_source", "float_turnover", "volume_30d_total", "avg_volume_30d",
               "relative_volume", "minute_relative_volume", "gap_pct", "change_pct", "spread_pct", "vwap", "ema9", "ema20",
-              "rsi", "signal_score", "signal", "alert_eligible", "stale", "market_open"]
+              "rsi", "signal_score", "signal", "alert_eligible", "stale", "market_open",
+              "avg_volume_3m", "avg_daily_volume", "day_relative_volume", "spread", "spread_fresh",
+              "beta", "beta_observations", "atr", "atr_pct", "history_as_of", "history_expected_as_of", "history_sessions",
+              "day_volume_basis", "day_volume_fresh", "day_volume_partial", "volume_filter_basis", "liquidity_volatility_score", "rank",
+              "ranking_available_metrics", "ranking_metric_coverage_pct"]
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()

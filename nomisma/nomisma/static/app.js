@@ -250,7 +250,7 @@ function renderStrategy() {
   const preset = presetFor(filters);
   const schedule = state.settings.schedule;
   const source = state.settings.source;
-  const universe = state.settings.universe === "custom" ? `${state.settings.symbols.length} custom symbols` : source === "csv" ? "Imported symbols" : source === "demo" ? "Synthetic stock universe" : ({curated:"Liquid US starter list", all:"All active US equities"})[state.settings.universe];
+  const universe = state.settings.universe === "custom" ? `${state.settings.symbols.length} custom symbols` : source === "csv" ? "Imported symbols" : source === "demo" ? "Synthetic stock universe" : ({curated:"Liquid US starter list", all:"All verified US-listed stocks"})[state.settings.universe];
   $("#strategy-panel").innerHTML = `<div class="strategy-top"><h2>Your strategy</h2><button class="icon-button" data-action="filters" aria-label="Edit your strategy">${icon("sliders")}</button></div><div class="strategy-name"><span class="strategy-emblem">${icon("compass")}</span><div><strong>${escapeHTML(preset?.name || "Custom strategy")}</strong><small>${escapeHTML(universe)}</small></div></div><div class="strategy-items"><div class="strategy-item"><span>Signal threshold</span><span>${number(filters.min_score)} / 100</span></div><div class="strategy-item"><span>Volume baseline</span><span>≥ ${number(filters.min_relative_volume, 1)}×</span></div><div class="strategy-item"><span>Momentum range</span><span>RSI ${number(filters.min_rsi)}–${number(filters.max_rsi)}</span></div><div class="strategy-item"><span>Data source</span><span>${escapeHTML(sourceName(source))}</span></div></div><div class="strategy-bottom"><span>${icon("clock")}${schedule.enabled ? `${escapeHTML(schedule.time)} ET · weekdays` : "Daily schedule is off"}</span><button class="text-button" data-action="settings">${schedule.enabled ? "Manage" : "Set schedule"} ${icon("arrow-right")}</button></div>`;
 }
 function renderWarnings() {
@@ -365,6 +365,8 @@ async function pollStatus() {
     const changed = Boolean(result.latest && result.latest.id !== state.latest?.id);
     if (result.latest) state.latest = result.latest;
     if (changed) await loadHistory(state.historyOffset);
+    if (state.pollFailed) showError("#global-error", "");
+    state.pollFailed = false;
     applyJob(result.job);
     if (changed) {
       state.page = 0;
@@ -372,6 +374,7 @@ async function pollStatus() {
       renderAll();
     }
   } catch (error) {
+    state.pollFailed = true;
     if (state.job.running) showError("#global-error", `Checking scan progress failed: ${error.message} Retrying automatically.`);
   } finally {
     state.polling = false;
@@ -476,7 +479,7 @@ function updateSourceControls() {
   const configurationLocation = window.nomismaDesktop?.configFile ? `<code>${escapeHTML(window.nomismaDesktop.configFile)}</code> (${window.nomismaDesktop.platform === "windows" ? "File" : "Nomisma"} menu → Open Configuration Folder)` : '<code>.env</code> in the Nomisma folder';
   $("#provider-controls").classList.remove("hidden");
   const universeSelect = $("#settings-universe");
-  const allDescription = source === "alpaca" ? "All active US exchange-listed equities" : source === "csv" ? "All symbols in your imported CSV" : "All symbols in the synthetic demo";
+  const allDescription = source === "alpaca" ? "All verified US-listed stocks" : source === "csv" ? "All symbols in your imported CSV" : "All symbols in the synthetic demo";
   universeSelect.options[0].textContent = source === "alpaca" ? "Liquid US stocks · starter universe" : source === "csv" ? "Imported dataset · default universe" : "Synthetic demo · default universe";
   universeSelect.options[1].textContent = allDescription;
   $("#csv-import-box").classList.toggle("hidden", source !== "csv");

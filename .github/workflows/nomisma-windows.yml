@@ -6,7 +6,7 @@ on:
       version:
         description: Installer version (major.minor.patch)
         required: true
-        default: "1.0.1"
+        default: "1.2.4"
         type: string
   push:
     branches: ["**"]
@@ -67,9 +67,9 @@ jobs:
         run: |
           $version = if ($env:BUILD_REF.StartsWith('refs/tags/nomisma-v')) {
             $env:BUILD_REF.Substring('refs/tags/nomisma-v'.Length)
-          } elseif ($env:REQUESTED_VERSION) { $env:REQUESTED_VERSION } else { '1.0.1' }
+          } elseif ($env:REQUESTED_VERSION) { $env:REQUESTED_VERSION } else { '1.2.4' }
           if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-            throw 'Use a major.minor.patch version, such as 1.0.1.'
+            throw 'Use a major.minor.patch version, such as 1.2.4.'
           }
           "NOMISMA_VERSION=$version" >> $env:GITHUB_ENV
 

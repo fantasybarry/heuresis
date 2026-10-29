@@ -418,9 +418,13 @@ def fetch_alpaca(universe="curated", symbols=None, progress=None):
             metadata[symbol].update(name=str(asset.get("name") or symbol)[:160],
                                     exchange=asset["exchange"])
         requested = sorted(metadata)
-        warnings.append("The all-equities universe includes active tradable NASDAQ, NYSE, AMEX and ARCA listings and can include ETFs and other exchange-traded products. It is not every US security.")
+        warnings.append("The all-equities universe includes active tradable NASDAQ, NYSE, AMEX and ARCA listings with a stocks-only classification filter. It is not every US security.")
         if unsupported:
             warnings.append("Skipped {} listing symbols with unsupported ticker formats.".format(unsupported))
+    from . import instruments
+    allowed = instruments.stock_symbols()
+    requested = [symbol for symbol in requested if symbol in allowed]
+    warnings.append("Stocks only: funds, derivatives and unverified instruments are excluded.")
     if not requested:
         raise ProviderError("The selected universe contains no supported symbols.")
     if len(requested) > 20000:

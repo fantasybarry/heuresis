@@ -2,29 +2,37 @@
 
 Snapshot and listing contracts:
 https://docs.alpaca.markets/us/reference/stocksnapshots-1
+https://docs.alpaca.markets/us/reference/stocklatestquotes-1
 https://docs.alpaca.markets/us/reference/get-v2-assets-1
 https://docs.alpaca.markets/us/docs/real-time-stock-pricing-data
 
 No fallback feed, order endpoints, or credential values are returned.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import math
 import re
 import threading
 
 from . import live_data as live
-from . import providers
+from . import providers, instruments
 from . import monitor_metrics as metrics
 from .monitor_metrics import demo_bundle
+from .screening_metrics import history_metrics, rank_rows, RANKING_WEIGHTS
 
 
 _DISCOVERY_DEFAULTS = {"source": "demo", "universe": "curated", "symbols": [],
                        "min_price": 0, "max_price": 1000, "min_day_volume": 0,
-                       "min_change_pct": 0, "limit": 100}
+                       "min_change_pct": -100, "limit": 100}
 _BOUNDS = {"min_price": (0, 1000000), "max_price": (0, 1000000),
            "min_day_volume": (0, 1e12), "min_change_pct": (-100, 1000000), "limit": (1, 500)}
 _DEMO_SYMBOLS = ["LABA", "LABB", "LABC", "LABD", "LABE", "LABF", "LABG", "LABH"]
+RANKING_POOL_LIMIT = 500
+
+
+def default_discovery():
+    return dict(_DISCOVERY_DEFAULTS, symbols=[])
 
 
 def _report(progress, message, stop_event=None):
@@ -36,7 +44,7 @@ def _report(progress, message, stop_event=None):
 def validate_discovery(payload):
     if not isinstance(payload, dict) or set(payload) - set(_DISCOVERY_DEFAULTS):
         raise ValueError("Supply discovery source, universe, symbols, and supported filters.")
-    result = dict(_DISCOVERY_DEFAULTS, **payload)
+    result = dict(default_discovery(), **payload)
     if result["source"] not in ("demo", "alpaca"):
         raise ValueError("Discovery source must be demo or alpaca.")
     if result["universe"] not in ("curated", "all", "custom"):
@@ -78,11 +86,14 @@ def _phase(session, now):
 
 
 def _universe(config, headers, account_url, progress, stop_event):
+    allowed = live._cancellable_call(instruments.stock_symbols, stop_event)
     if config["universe"] == "custom":
-        requested = config["symbols"]
+        requested = [symbol for symbol in config["symbols"] if symbol in allowed]
+        if not requested:
+            raise ValueError("No verified company stocks in the selected symbols.")
         return requested, {symbol: providers._asset_metadata(symbol) for symbol in requested}, "Custom symbols", []
     if config["universe"] == "curated":
-        requested = list(providers.CURATED_SYMBOLS)
+        requested = [symbol for symbol in providers.CURATED_SYMBOLS if symbol in allowed]
         return requested, {symbol: providers._asset_metadata(symbol) for symbol in requested}, "Maintained starter universe", []
     _report(progress, "Loading active tradable US listings…", stop_event)
     listing = live._get_json(account_url + "/v2/assets", {"status": "active", "asset_class": "us_equity"}, headers, stop_event)
@@ -102,10 +113,12 @@ def _universe(config, headers, account_url, progress, stop_event):
         except ValueError:
             unsupported += 1
             continue
+        if symbol not in allowed:
+            continue
         metadata[symbol] = {"symbol": symbol, "name": str(item.get("name") or symbol)[:160]}
     if not metadata or len(metadata) > 20000:
         raise ValueError("Listing universe is empty or exceeds 20,000 symbols; select a smaller universe.")
-    warnings = ["All listings means active tradable NASDAQ, NYSE, AMEX, ARCA/NYSEARCA and BATS US equities offered by Alpaca; ETFs and other exchange-traded products may be included. It is not every US security."]
+    warnings = ["All listings means active tradable NASDAQ, NYSE, AMEX, ARCA/NYSEARCA and BATS US equities offered by Alpaca; Only verified company common/ordinary stocks and depositary shares are eligible; funds and other products are excluded. It is not every US security."]
     if unsupported:
         warnings.append("Skipped {} unsupported ticker formats.".format(unsupported))
     return sorted(metadata), metadata, "Alpaca active tradable US listings", warnings
@@ -124,39 +137,185 @@ def _positive(raw, maximum=1e15):
     return float(raw)
 
 
+def _volume_is_fresh(volume, received_at, volume_at, basis, now):
+    fallback = basis == "completed_extended_minutes"
+    maximum_age = 120 if fallback else 300
+    if volume is None or received_at is None or not 0 <= (now - received_at).total_seconds() <= maximum_age:
+        return False
+    return (not fallback or bool(volume_at and volume_at.astimezone(live._NY).date() == now.astimezone(live._NY).date()
+                                 and 0 <= (now - volume_at).total_seconds() <= maximum_age))
+
+
 def _candidate(symbol, snapshot, name, now, session):
-    """Return a validated row plus exclusion reason; never borrow yesterday."""
+    """Validate current prices; unavailable day volume remains explicitly missing."""
     if not isinstance(snapshot, dict):
         return None, "invalid"
     try:
         trade, daily, previous = (snapshot.get(key) for key in ("latestTrade", "dailyBar", "prevDailyBar"))
-        if not all(isinstance(value, dict) for value in (trade, daily, previous)):
+        if not all(isinstance(value, dict) for value in (trade, previous)):
             return None, "missing"
-        trade_at, volume_at, previous_at = (live._stamp(raw) for raw in (trade.get("t"), daily.get("t"), previous.get("t")))
+        trade_at, previous_at = (live._stamp(raw) for raw in (trade.get("t"), previous.get("t")))
         today = now.astimezone(live._NY).date().isoformat()
         if (session["date"] != today or trade_at.astimezone(live._NY).date().isoformat() != today
-                or volume_at.astimezone(live._NY).date().isoformat() != today
                 or previous_at.astimezone(live._NY).date().isoformat() != session["previous_date"]):
             return None, "stale"
-        if trade_at > now or volume_at > now:
+        if trade_at > now:
             return None, "invalid"
         price, previous_close = _positive(trade.get("p")), _positive(previous.get("c"))
+        daily = daily if isinstance(daily, dict) else {}
+        volume_at = _stamp_or_none(daily.get("t"))
         volume = daily.get("v")
-        if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) or not 0 <= volume <= 1e15 or int(volume) != volume:
+        if volume_at and volume_at > now:
             return None, "invalid"
+        if volume_at and volume_at.astimezone(live._NY).date().isoformat() == today:
+            if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) or not 0 <= volume <= 1e15 or int(volume) != volume:
+                return None, "invalid"
+            volume = int(volume)
+        else:
+            volume, volume_at = None, None
+        volume_basis = snapshot.get("_volume_basis", "provider_daily_aggregate") if volume is not None else "unavailable"
+        if volume_basis == "completed_extended_minutes":
+            volume_at = _stamp_or_none(snapshot.get("_volume_through"))
+        received_at = _stamp_or_none(snapshot.get("_received_at"))
+        day_fresh = _volume_is_fresh(volume, received_at, volume_at, volume_basis, now)
         age = max(0, (now - trade_at).total_seconds())
         quote = snapshot.get("latestQuote") or {}
         minute = snapshot.get("minuteBar") or {}
         quote_at = _stamp_or_none(quote.get("t")) if isinstance(quote, dict) else None
         minute_at = _stamp_or_none(minute.get("t")) if isinstance(minute, dict) else None
+        spread, spread_pct = None, None
+        quote_fresh = bool(quote_at and 0 <= (now - quote_at).total_seconds() <= 30)
+        if quote_fresh and metrics._number(quote.get("bp"), .000001, 1e15) and metrics._number(quote.get("ap"), .000001, 1e15) and quote["ap"] >= quote["bp"]:
+            spread = quote["ap"] - quote["bp"]
+            spread_pct = 100 * spread / ((quote["ap"] + quote["bp"]) / 2)
         return {"symbol": symbol, "name": name, "price": price,
-                "change_pct": (price / previous_close - 1) * 100, "day_volume": int(volume),
+                "change_pct": (price / previous_close - 1) * 100, "day_volume": volume,
+                "day_volume_fresh": day_fresh,
+                "volume_basis": volume_basis,
+                "volume_partial": snapshot.get("_volume_partial", False) if volume is not None else False,
+                "spread": spread, "spread_pct": spread_pct, "spread_fresh": spread_pct is not None,
                 "trade_at": trade_at.isoformat(), "quote_at": quote_at.isoformat() if quote_at else None,
-                "minute_at": minute_at.isoformat() if minute_at else None, "volume_at": volume_at.isoformat(),
+                "minute_at": minute_at.isoformat() if minute_at else None, "volume_at": volume_at.isoformat() if volume_at else None,
                 "volume_received_at": snapshot.get("_received_at"),
                 "age_seconds": round(age, 1), "freshness": "fresh" if age <= 300 else "stale"}, None
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None, "invalid"
+
+
+def _extend_missing_day_volume(snapshots, session, now, feed, headers, progress, stop_event, config):
+    """Fill unavailable current aggregates from completed extended-hours minutes."""
+    today = now.astimezone(live._NY).date().isoformat()
+    eligible = []
+    for symbol, snapshot in snapshots.items():
+        if not isinstance(snapshot, dict):
+            continue
+        trade = snapshot.get("latestTrade") or {}
+        daily = snapshot.get("dailyBar") or {}
+        trade_at = _stamp_or_none(trade.get("t")) if isinstance(trade, dict) else None
+        daily_at = _stamp_or_none(daily.get("t")) if isinstance(daily, dict) else None
+        if (trade_at and trade_at <= now and trade_at.astimezone(live._NY).date().isoformat() == today
+                and (daily_at is None or daily_at.astimezone(live._NY).date().isoformat() != today)):
+            candidate, reason = _candidate(symbol, snapshot, symbol, now, session)
+            if (reason is None and config["min_price"] <= candidate["price"] <= config["max_price"]
+                    and candidate["change_pct"] >= config["min_change_pct"]):
+                eligible.append(symbol)
+    if not eligible or session["date"] != today:
+        return {"requested": 0, "loaded": 0, "omitted": 0}, []
+    # Snapshot volumes are unavailable here, so choose the most recent current
+    # trades deterministically; disclose any omitted part of a large universe.
+    eligible.sort(key=lambda symbol: (-live._stamp(snapshots[symbol]["latestTrade"]["t"]).timestamp(), symbol))
+    selected = eligible[:RANKING_POOL_LIMIT]
+    _report(progress, "Loading completed extended-hours volume for {} symbols…".format(len(selected)), stop_event)
+    warnings = []
+    try:
+        volumes = live.extended_day_volumes(selected, session, now, feed, headers, stop_event)
+    except live._Cancelled:
+        raise
+    except (ValueError, RuntimeError):
+        volumes = {}
+        warnings.append("Extended-hours minute volume could not be loaded. Candidates with missing day volume remain visible when the minimum-volume filter is zero.")
+    loaded = 0
+    for symbol in selected:
+        value = volumes.get(symbol) or {}
+        volume = value.get("volume")
+        if not metrics._number(volume, 0, 1e15) or int(volume) != volume:
+            continue
+        snapshot = snapshots[symbol]
+        start = now.astimezone(live._NY).replace(hour=4, minute=0, second=0, microsecond=0)
+        snapshot["dailyBar"] = {"t": start.isoformat(), "v": int(volume)}
+        snapshot["_received_at"] = value.get("received_at")
+        snapshot["_volume_basis"] = "completed_extended_minutes"
+        snapshot["_volume_through"] = value.get("as_of")
+        snapshot["_volume_partial"] = True
+        loaded += 1
+    if loaded:
+        warnings.append("For {} symbols without a current daily aggregate, volume is the sum of completed extended-hours minute bars from 04:00 Eastern. It can undercount the provider daily aggregate because trade eligibility differs and the current minute is incomplete; it is never added to a daily aggregate.".format(loaded))
+    if len(eligible) > len(selected):
+        warnings.append("Extended-hours fallback was limited to {} of {} symbols without a current daily aggregate, selected by most recent trade. Missing-volume candidates are still eligible when the minimum-volume filter is zero.".format(len(selected), len(eligible)))
+    return {"requested": len(selected), "loaded": loaded, "omitted": len(eligible) - len(selected)}, warnings
+
+
+def _refresh_screening_quotes(rows, session, now, feed, headers, progress=None, stop_event=None):
+    """Repair aged-out selected-pool quotes without changing trade/volume data."""
+    live._check_stop(stop_event)
+    eligible = []
+    regular = _phase(session, now) == "regular"
+    for row in rows:
+        trade_at = _stamp_or_none(row.get("trade_at"))
+        if regular and (trade_at is None or not 0 <= (now - trade_at).total_seconds() <= 300):
+            continue
+        quote_at = _stamp_or_none(row.get("quote_at"))
+        if not (row.get("spread_fresh") and quote_at and 0 <= (now - quote_at).total_seconds() <= 30):
+            eligible.append(row)
+    summary = {"requested": len(eligible), "loaded": 0, "unavailable": 0}
+    if not eligible:
+        return summary, []
+    _report(progress, "Refreshing latest quotes for {} ranked candidates…".format(len(eligible)), stop_event)
+    batches = [eligible[index:index + 50] for index in range(0, len(eligible), 50)]
+    loading_stop = live._LoadStop(stop_event)
+
+    def fetch(batch):
+        symbols = [row["symbol"] for row in batch]
+        try:
+            payload = live._get_json("https://data.alpaca.markets/v2/stocks/quotes/latest", {
+                "symbols": ",".join(symbols), "feed": feed}, headers, loading_stop)
+            quotes = payload.get("quotes") if isinstance(payload, dict) else None
+            if not isinstance(quotes, dict) or any(symbol not in symbols for symbol in quotes):
+                return {}
+            return quotes
+        except live._Cancelled:
+            raise
+        except (ValueError, RuntimeError):
+            return {}
+
+    quotes = {}
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="nomisma-screening-quotes") as executor:
+        futures = [executor.submit(fetch, batch) for batch in batches]
+        try:
+            for future in as_completed(futures):
+                quotes.update(future.result())
+        except Exception:
+            loading_stop.cancelled.set()
+            raise
+    live._check_stop(stop_event)
+    completed_at = live._now()
+    for row in eligible:
+        quote = quotes.get(row["symbol"])
+        quote_at = _stamp_or_none(quote.get("t")) if isinstance(quote, dict) else None
+        if (quote_at is None or not 0 <= (completed_at - quote_at).total_seconds() <= 30
+                or quote_at.astimezone(live._NY).date().isoformat() != session["date"]):
+            continue
+        if (not metrics._number(quote.get("bp"), .000001, 1e15)
+                or not metrics._number(quote.get("ap"), .000001, 1e15) or quote["ap"] < quote["bp"]):
+            continue
+        spread = quote["ap"] - quote["bp"]
+        row.update(quote_at=quote_at.isoformat(), spread=spread,
+                   spread_pct=100 * spread / ((quote["ap"] + quote["bp"]) / 2), spread_fresh=True)
+        summary["loaded"] += 1
+    summary["unavailable"] = summary["requested"] - summary["loaded"]
+    warnings = (["Latest quote refresh left {} of {} requested spreads unavailable. Missing, stale, invalid, or inaccessible quotes earn no spread ranking points.".format(
+        summary["unavailable"], summary["requested"])] if summary["unavailable"] else [])
+    return summary, warnings
 
 
 def discover(payload, progress=None, stop_event=None):
@@ -165,6 +324,8 @@ def discover(payload, progress=None, stop_event=None):
     checked_at = live._now()
     now = checked_at
     warnings = []
+    histories, benchmark = {}, []
+    fallback = {"requested": 0, "loaded": 0, "omitted": 0}
     if config["source"] == "demo":
         if config["universe"] == "all":
             raise ValueError("The all-listings discovery universe requires Alpaca. Choose the synthetic starter or custom symbols for demo.")
@@ -178,9 +339,11 @@ def discover(payload, progress=None, stop_event=None):
                 snapshot = asset["snapshot"]
                 snapshot["prevDailyBar"]["t"] = bundle["session"]["previous_date"] + "T13:30:00+00:00"
                 snapshot["minuteBar"] = dict(asset["minutes"][-1])
-                snapshot["_received_at"] = checked_at.isoformat()
+                snapshot["_received_at"] = bundle["as_of"]
                 snapshots[asset["symbol"]] = snapshot
                 metadata[asset["symbol"]] = {"name": asset["name"]}
+                histories[asset["symbol"]] = asset["bars"]
+        benchmark = bundle.get("benchmark_bars", [])
         session = bundle["session"]
         now = live._stamp(bundle["as_of"])
         feed, label = "synthetic", "Synthetic momentum lab"
@@ -207,12 +370,15 @@ def discover(payload, progress=None, stop_event=None):
         now = live._now()
         if now.astimezone(live._NY).date() != checked_at.astimezone(live._NY).date():
             raise ValueError("The New York date changed during discovery. Refresh to scan one consistent session.")
+        fallback, fallback_warnings = _extend_missing_day_volume(snapshots, session, now, feed, headers, progress, stop_event, config)
+        warnings.extend(fallback_warnings)
+        now = live._now()
     phase = _phase(session, now)
     if feed == "iex":
         warnings.append("IEX covers one exchange; prices and share volume are not consolidated US market data.")
     if phase == "closed":
         warnings.append("There is no exchange session today. Previous-session snapshots are excluded from current-session candidates.")
-    warnings.append("Change is latest trade versus the raw previous-session close; corporate actions such as splits can distort it. Day volume is the provider's current daily aggregate and can include extended hours; its timestamp identifies the aggregate day, not the last update. Refresh is manual.")
+    warnings.append("Change is latest trade versus the raw previous-session close; corporate actions such as splits can distort it. Day volume is the provider's current daily aggregate and can include extended hours; provider aggregate timestamps identify the day, while fallback timestamps show the actual completed-minute volume-through time. Results capture one search; run again or enable a weekday schedule to update them.")
     coverage = {"requested": len(requested), "received": len(snapshots), "current_session": 0,
                 "matched": 0, "returned": 0, "missing": 0, "stale": 0, "invalid": 0}
     rows = []
@@ -232,11 +398,98 @@ def discover(payload, progress=None, stop_event=None):
             if phase == "regular":
                 continue
         if (config["min_price"] <= row["price"] <= config["max_price"]
-                and row["day_volume"] >= config["min_day_volume"]
+                and (config["min_day_volume"] == 0 or (row["day_volume"] is not None and row["day_volume"] >= config["min_day_volume"]
+                     and (row["volume_basis"] != "completed_extended_minutes" or row["day_volume_fresh"])))
                 and row["change_pct"] >= config["min_change_pct"]):
             rows.append(row)
-    rows.sort(key=lambda row: (-row["change_pct"], -row["day_volume"], row["symbol"]))
-    coverage.update(matched=len(rows), returned=min(len(rows), config["limit"]))
+    if config["source"] == "alpaca" and rows and config["min_day_volume"] > 0:
+        # The volume minimum counts regular-session trading only (premarket excluded), summed from
+        # 1-minute bars like the monitor's alert rule. Total day volume is never lower, so it prefilters.
+        rows.sort(key=lambda row: (-(row["day_volume"] or 0), row["symbol"]))
+        rows = rows[:RANKING_POOL_LIMIT]
+        _report(progress, "Loading regular-session volume for {} candidates…".format(len(rows)), stop_event)
+        regular = {}
+        for offset in range(0, len(rows), 50):
+            chunk = [row["symbol"] for row in rows[offset:offset + 50]]
+            for symbol, bars in live._history(chunk, session, None, now, feed, headers, stop_event, "1Min").items():
+                regular[symbol] = math.fsum(bar["volume"] for bar in bars)
+        for row in rows:
+            row["regular_volume"] = regular.get(row["symbol"], 0)
+        rows = [row for row in rows if row["regular_volume"] >= config["min_day_volume"]]
+    matched = len(rows)
+    rows.sort(key=lambda row: (-(row["day_volume"] if row["day_volume"] is not None else -1), row["symbol"]))
+    rows = rows[:RANKING_POOL_LIMIT]
+    pool_selected = len(rows)
+    if matched > len(rows):
+        warnings.append("Historical enrichment and the liquidity/volatility ranking cover the {} highest total-day-volume candidates out of {} filter matches. {} other matches were outside this ranking pool; narrow the universe or filters to inspect them.".format(len(rows), matched, matched - len(rows)))
+    if config["source"] == "alpaca" and rows:
+        _report(progress, "Loading prior-session liquidity and volatility for {} candidates…".format(len(rows)), stop_event)
+        try:
+            histories = live.screening_history([row["symbol"] for row in rows], session, now, feed, headers, stop_event)
+            benchmark = histories.get("SPY", [])
+        except live._Cancelled:
+            raise
+        except (ValueError, RuntimeError):
+            histories, benchmark = {}, []
+            warnings.append("Historical liquidity and volatility could not be loaded. Candidates remain visible; missing metrics earn zero ranking points.")
+    quote_refresh = {"requested": 0, "loaded": 0, "unavailable": 0}
+    if config["source"] == "alpaca":
+        now = live._now()
+        if now.astimezone(live._NY).date() != checked_at.astimezone(live._NY).date():
+            raise ValueError("The New York date changed during discovery. Refresh to scan one consistent session.")
+        quote_refresh, quote_warnings = _refresh_screening_quotes(rows, session, now, feed, headers, progress, stop_event)
+        warnings.extend(quote_warnings)
+        now = live._now()
+        if now.astimezone(live._NY).date() != checked_at.astimezone(live._NY).date():
+            raise ValueError("The New York date changed during discovery. Refresh to scan one consistent session.")
+        phase = _phase(session, now)
+    fresh_rows = []
+    expired = 0
+    expired_volume = 0
+    for row in rows:
+        row["age_seconds"] = round(max(0, (now - live._stamp(row["trade_at"])).total_seconds()), 1)
+        row["freshness"] = "fresh" if row["age_seconds"] <= 300 else "stale"
+        if phase == "regular" and row["freshness"] == "stale":
+            expired += 1
+            continue
+        quote_at = _stamp_or_none(row.get("quote_at"))
+        if not quote_at or not 0 <= (now - quote_at).total_seconds() <= 30:
+            row.update(spread=None, spread_pct=None, spread_fresh=False)
+        received_at = _stamp_or_none(row.get("volume_received_at"))
+        row["day_volume_fresh"] = _volume_is_fresh(row["day_volume"], received_at, _stamp_or_none(row.get("volume_at")), row["volume_basis"], now)
+        if config["min_day_volume"] > 0 and row["volume_basis"] == "completed_extended_minutes" and not row["day_volume_fresh"]:
+            expired_volume += 1
+            continue
+        fresh_rows.append(row)
+    rows = fresh_rows
+    if expired:
+        coverage["stale"] += expired
+        warnings.append("{} candidate prices became older than five minutes while historical metrics loaded and were excluded from regular-session results.".format(expired))
+    if expired_volume:
+        warnings.append("{} extended-hours volume totals became older than two minutes while historical metrics loaded and were excluded by the minimum-volume filter.".format(expired_volume))
+    for row in rows:
+        row.update(history_metrics(histories.get(row["symbol"], []), benchmark, session["date"],
+                                   previous_session_date=session["previous_date"]))
+        average = row["avg_daily_volume"]
+        row["day_relative_volume"] = row["day_volume"] / average if row["day_volume_fresh"] and average and average > 0 else None
+        row["metric_availability"].update({
+            "day_volume": {"available": row["day_volume_fresh"], "reason": None if row["day_volume_fresh"] else "A fresh current-session day-volume aggregate is unavailable."},
+            "day_relative_volume": {"available": row["day_relative_volume"] is not None, "reason": None if row["day_relative_volume"] is not None else "Need fresh day volume and 20 complete prior sessions of average daily volume."},
+            "spread_pct": {"available": row["spread_fresh"], "reason": None if row["spread_fresh"] else "Need a valid bid/ask quote no older than 30 seconds."},
+        })
+    rank_rows(rows)
+    rows.sort(key=lambda row: row["rank"])
+    coverage.update(matched=matched, returned=min(len(rows), config["limit"]), ranking_pool=len(rows),
+                    ranking_pool_limit=RANKING_POOL_LIMIT, ranking_omitted=matched - pool_selected,
+                    expired_during_enrichment=expired,
+                    expired_volume_during_enrichment=expired_volume,
+                    quote_refresh_requested=quote_refresh["requested"], quote_refresh_loaded=quote_refresh["loaded"],
+                    quote_refresh_unavailable=quote_refresh["unavailable"],
+                    extended_volume_requested=fallback["requested"], extended_volume_loaded=fallback["loaded"],
+                    extended_volume_omitted=fallback["omitted"],
+                    metrics_complete=sum(row["ranking_available_metrics"] == len(RANKING_WEIGHTS) for row in rows),
+                    metrics_partial=sum(row["ranking_available_metrics"] < len(RANKING_WEIGHTS) for row in rows))
+    warnings.append("Liquidity/volatility score is a relative ranking within the displayed ranking pool, not a return forecast. It favors total day volume, 63-session average volume, 20-session ADV, day RVOL, tight fresh spreads, positive beta and ATR%. Missing metrics receive zero points without excluding the candidate. Day RVOL is not adjusted for time of day.")
     if coverage["stale"]:
         warnings.append("Stale or previous-session data was found for {} symbols. Trades older than five minutes are excluded during regular hours; outside regular hours retained current-day rows are labeled stale.".format(coverage["stale"]))
     live._check_stop(stop_event)
@@ -245,7 +498,8 @@ def discover(payload, progress=None, stop_event=None):
             "session_date": now.astimezone(live._NY).date().isoformat(), "latest_session_date": session["date"],
             "market_phase": "synthetic" if feed == "synthetic" else phase,
             "universe": config["universe"], "universe_label": label, "coverage": coverage,
-            "rows": rows[:config["limit"]], "warnings": warnings, "filters": config}
+            "rows": rows[:config["limit"]], "warnings": warnings, "filters": config,
+            "ranking": {"weights": dict(RANKING_WEIGHTS), "pool_limit": RANKING_POOL_LIMIT, "benchmark": "Synthetic benchmark" if feed == "synthetic" else "SPY"}}
 
 
 def _safe_failure(error):

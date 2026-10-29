@@ -11,7 +11,9 @@ The monitor owns reconnect/reseed policy. Credentials never enter callbacks.
 """
 
 import base64
+import copy
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as daytime, timedelta, timezone
 import hashlib
 import json
@@ -29,6 +31,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from zoneinfo import ZoneInfo
 
 from . import providers
+from .monitor_metrics import MAX_MONITOR_SYMBOLS
+from .planning_data import _time
 
 
 _NY = ZoneInfo("America/New_York")
@@ -36,15 +40,33 @@ _STREAM_HOST = "stream.data.alpaca.markets"
 _CHANNELS = ("trades", "quotes", "bars", "updatedBars", "dailyBars")
 _FRAME_LIMIT = 1024 * 1024
 _MESSAGE_LIMIT = 2 * _FRAME_LIMIT
-_HTTP_WORKERS = threading.BoundedSemaphore(2)
+_HTTP_WORKERS = threading.BoundedSemaphore(4)
 _FLOAT_CACHE = OrderedDict()
 _FLOAT_LOCK = threading.Lock()
 _FLOAT_TTL = 24 * 60 * 60
+_HISTORY_CACHE = OrderedDict()
+_HISTORY_LOCK = threading.Lock()
+_HISTORY_TTL = 30 * 60
+_HISTORY_CACHE_LIMIT = 768
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class _Cancelled(ValueError):
     pass
+
+
+class LiveSubscriptionLimit(ValueError):
+    """A rejected symbol list needs user action, not repeated reconnection."""
+
+
+class _LoadStop:
+    def __init__(self, parent):
+        self.parent = parent
+        self.cancelled = threading.Event()
+
+    def is_set(self):
+        return self.cancelled.is_set() or (self.parent is not None and self.parent.is_set())
+
 
 
 def _now():
@@ -78,8 +100,8 @@ def _credentials():
 
 
 def _symbols(values):
-    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= 20:
-        raise ValueError("Live monitoring requires between 1 and 20 ticker symbols.")
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= MAX_MONITOR_SYMBOLS:
+        raise ValueError("Live monitoring requires between 1 and {} ticker symbols.".format(MAX_MONITOR_SYMBOLS))
     return list(dict.fromkeys(providers._symbol(value) for value in values))
 
 
@@ -87,7 +109,7 @@ def _cancellable_call(function, stop_event, *args):
     """Stop promptly without changing the existing fixed-host GET transport.
 
     Its bounded HTTP retry can finish in a daemon worker after cancellation.
-    The shared two-worker cap also bounds abandoned requests during repeated
+    The shared four-worker cap also bounds abandoned requests during repeated
     start/stop cycles. An abandoned result can never reach the monitor.
     """
     _check_stop(stop_event)
@@ -128,14 +150,10 @@ def _get_json(url, params, headers, stop_event=None):
 
 
 def _stamp(raw):
-    if not isinstance(raw, str):
-        raise ValueError("Invalid timestamp.")
-    # Alpaca uses nanoseconds; Python 3.9 fromisoformat needs microseconds.
-    raw = re.sub(r"(\.\d{6})\d+(?=Z|[+-]\d\d:\d\d$)", r"\1", raw)
-    stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    if stamp.tzinfo is None:
-        raise ValueError("Timestamp requires timezone.")
-    return stamp.astimezone(timezone.utc)
+    stamp = _time(raw) if isinstance(raw, str) else None
+    if stamp is None:
+        raise ValueError("Invalid timestamp; a timezone is required.")
+    return stamp
 
 
 def _session(calendar, now):
@@ -166,11 +184,14 @@ def _session(calendar, now):
             "prior_dates": [prior.isoformat() for prior in days[:-1][-30:]]}, set(days)
 
 
-def _history(symbols, session, calendar_days, now, feed, headers, stop_event, timeframe):
+def _history(symbols, session, calendar_days, now, feed, headers, stop_event, timeframe, history_days=90, extended=False):
     day = date.fromisoformat(session["date"])
     opening, closing = _stamp(session["open"]), _stamp(session["close"])
+    if extended:
+        opening = datetime.combine(day, daytime(4), _NY).astimezone(timezone.utc)
+        closing = datetime.combine(day, daytime(20), _NY).astimezone(timezone.utc)
     if timeframe == "1Day":
-        start = datetime.combine(day - timedelta(days=90), daytime.min, _NY)
+        start = datetime.combine(day - timedelta(days=history_days), daytime.min, _NY)
         end = datetime.combine(day, daytime.min, _NY) - timedelta(microseconds=1)
     else:
         start = opening
@@ -195,7 +216,9 @@ def _history(symbols, session, calendar_days, now, feed, headers, stop_event, ti
                     stamp = _stamp(raw["t"])
                     bar_day = stamp.astimezone(_NY).date()
                     if timeframe == "1Day":
-                        if not day - timedelta(days=90) <= bar_day < day or bar_day not in calendar_days:
+                        if not day - timedelta(days=history_days) <= bar_day < day:
+                            continue
+                        if (bar_day.weekday() >= 5 if calendar_days is None else bar_day not in calendar_days):
                             continue
                         key = bar_day.isoformat()
                     else:
@@ -233,11 +256,110 @@ def _history(symbols, session, calendar_days, now, feed, headers, stop_event, ti
     return {symbol: [items[key] for key in sorted(items)] for symbol, items in collected.items()}
 
 
-def load_live_seed(symbols, progress=None, stop_event=None):
+# Calendar-day window searched for _CANDLE_COUNT bars; newest-first paging stops once enough arrive.
+_CANDLE_LOOKBACK = {"1Min": 14, "5Min": 60, "15Min": 120, "1Hour": 365, "1Day": 7300}
+_CANDLE_COUNT = 400
+
+
+def fetch_candles(symbol, timeframe, before=None):
+    """Latest OHLCV bars (or those before an ISO time) at one timeframe, extended hours included, oldest first."""
+    if timeframe not in _CANDLE_LOOKBACK:
+        raise ValueError("Timeframe must be one of: " + ", ".join(_CANDLE_LOOKBACK) + ".")
+    symbol = providers._symbol(symbol)
+    end = _stamp(before) - timedelta(microseconds=1) if before is not None else _now()
+    status, headers, unused_account = _credentials()
+    params = {"symbols": symbol, "timeframe": timeframe, "limit": _CANDLE_COUNT, "sort": "desc",
+              "start": (end - timedelta(days=_CANDLE_LOOKBACK[timeframe])).isoformat(),
+              "end": end.isoformat(), "adjustment": "split", "feed": status["feed"]}
+    raws = []
+    for page in range(10):
+        payload = _get_json("https://data.alpaca.markets/v2/stocks/bars", params, headers)
+        if not isinstance(payload, dict) or not isinstance(payload.get("bars"), dict):
+            raise ValueError("Alpaca returned an invalid candle response.")
+        raws.extend(payload["bars"].get(symbol) or [])
+        token = payload.get("next_page_token")
+        if len(raws) >= _CANDLE_COUNT or not token or not isinstance(token, str) or token == params.get("page_token"):
+            break
+        params["page_token"] = token
+    candles = []
+    for raw in reversed(raws[:_CANDLE_COUNT]):
+        try:
+            bar = providers._bar(None, {"open": raw["o"], "high": raw["h"], "low": raw["l"],
+                                        "close": raw["c"], "volume": raw["v"]}, symbol)
+            bar.pop("date")
+            bar["t"] = _stamp(raw["t"]).isoformat()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise ValueError("Alpaca returned an invalid {} candle for {}.".format(timeframe, symbol)) from None
+        candles.append(bar)
+    return {"symbol": symbol, "timeframe": timeframe, "feed": status["feed"], "candles": candles}
+
+
+def _screening_symbols(symbols):
+    if not isinstance(symbols, (list, tuple)) or not 1 <= len(symbols) <= 500:
+        raise ValueError("Screening history requires 1 to 500 symbols.")
+    return list(dict.fromkeys(providers._symbol(symbol) for symbol in symbols))
+
+
+def screening_history(symbols, session, now, feed, headers, stop_event=None, refresh=False):
+    """Prior split-adjusted daily bars plus SPY, cached per session and access."""
+    _check_stop(stop_event)
+    symbols = list(dict.fromkeys(_screening_symbols(symbols) + ["SPY"]))
+    if feed not in ("iex", "sip"):
+        raise ValueError("Screening history requires the selected real-time feed.")
+    session_day = providers._date(session["date"])
+    if session_day > now.astimezone(_NY).date():
+        raise ValueError("Screening history cannot use a future session.")
+    identity = hashlib.sha256((headers.get("APCA-API-KEY-ID", "") + "\0" +
+                               headers.get("APCA-API-SECRET-KEY", "")).encode()).digest()
+    keys = {symbol: (feed, session_day.isoformat(), symbol, identity) for symbol in symbols}
+    result, missing = {}, []
+    with _HISTORY_LOCK:
+        for symbol in symbols:
+            cached = _HISTORY_CACHE.get(keys[symbol])
+            if not refresh and cached is not None and time.monotonic() - cached[0] < _HISTORY_TTL:
+                result[symbol] = copy.deepcopy(cached[1])
+                _HISTORY_CACHE.move_to_end(keys[symbol])
+            else:
+                missing.append(symbol)
+    if missing:
+        # Split batches keep individual URLs/pages bounded for up to 500 names.
+        for index in range(0, len(missing), 100):
+            chunk = missing[index:index + 100]
+            result.update(_history(chunk, session, None, now, feed, headers, stop_event, "1Day", history_days=400))
+        _check_stop(stop_event)
+        with _HISTORY_LOCK:
+            for symbol in missing:
+                _HISTORY_CACHE[keys[symbol]] = (time.monotonic(), copy.deepcopy(result[symbol]))
+                _HISTORY_CACHE.move_to_end(keys[symbol])
+            while len(_HISTORY_CACHE) > _HISTORY_CACHE_LIMIT:
+                _HISTORY_CACHE.popitem(last=False)
+    return {symbol: result[symbol] for symbol in symbols}
+
+
+def extended_day_volumes(symbols, session, now, feed, headers, stop_event=None):
+    """Completed provider minute volume since 04:00NY; never added to dailyBar."""
+    symbols = _screening_symbols(symbols)
+    collected = {}
+    for index in range(0, len(symbols), 50):
+        chunk = symbols[index:index + 50]
+        collected.update(_history(chunk, session, None, now, feed, headers, stop_event, "1Min", extended=True))
+    received = _now().isoformat()
+    result = {}
+    for symbol in symbols:
+        bars = collected[symbol]
+        result[symbol] = {"volume": math.fsum(bar["volume"] for bar in bars) if bars else None,
+                          "as_of": (_stamp(bars[-1]["t"]) + timedelta(minutes=1)).isoformat() if bars else None,
+                          "received_at": received, "basis": "Completed extended-hours minute bars since 04:00 New York (may exclude volume-only trades)",
+                          "minutes": bars}
+    return result
+
+
+def load_live_seed(symbols, progress=None, stop_event=None, refresh=False):
     """Fetch prior sessions and every completed regular-session minute."""
     _check_stop(stop_event)
     symbols = _symbols(symbols)
     status, headers, account_url = _credentials()
+    stop_event = _LoadStop(stop_event)
     now = _now()
     today = now.astimezone(_NY).date()
 
@@ -246,6 +368,9 @@ def load_live_seed(symbols, progress=None, stop_event=None):
         if progress:
             progress(message)
 
+    from . import instruments
+    report("Verifying stocks-only symbols…")
+    _cancellable_call(instruments.require_stocks, stop_event, symbols)
     report("Loading exchange session hours…")
     calendar = _get_json(account_url + "/v2/calendar", {
         "start": (today - timedelta(days=100)).isoformat(), "end": today.isoformat()}, headers, stop_event)
@@ -253,43 +378,104 @@ def load_live_seed(symbols, progress=None, stop_event=None):
     warnings = ["Technical setup alerts apply only during regular exchange hours. Trading halt detection is not guaranteed."]
     if status["feed"] == "iex":
         warnings.append("IEX covers one exchange; its prices and volumes are not consolidated US market data. Use entitled SIP for consolidated coverage.")
-    report("Loading split-adjusted volume history…")
-    daily = _history(symbols, session, calendar_days, now, status["feed"], headers, stop_event, "1Day")
-    floats = {}
-    if status["float_configured"]:
-        for symbol in symbols:
-            report("Loading dated float for {}…".format(symbol))
+    report("Loading history, current prices, and dated floats in parallel…")
+
+    def load_floats():
+        if not status["float_configured"]:
+            return {}, []
+
+        def load_one(symbol):
+            _check_stop(stop_event)
+            problems = []
+            value = None
             try:
-                floats[symbol] = _cancellable_call(fetch_float, stop_event, symbol)
+                value = _cancellable_call(fetch_float, stop_event, symbol, refresh)
             except _Cancelled:
                 raise
             except ValueError:
-                warnings.append("{}: FMP float could not be loaded; prices remain available.".format(symbol))
-            if floats.get(symbol) is None:
-                warnings.append("{}: no dated share float is available; a dated manual value can be entered.".format(symbol))
-    report("Loading all completed regular-session minutes…")
-    now = _now()
-    minutes = _history(symbols, session, calendar_days, now, status["feed"], headers, stop_event, "1Min")
-    report("Loading current quotes and trades…")
-    snapshots = _get_json("https://data.alpaca.markets/v2/stocks/snapshots", {
-        "symbols": ",".join(symbols), "feed": status["feed"]}, headers, stop_event)
-    snapshots_received_at = _now().isoformat()
-    if not isinstance(snapshots, dict) or any(key not in symbols for key in snapshots):
+                problems.append("{}: FMP float could not be loaded; prices remain available.".format(symbol))
+            if value is None:
+                problems.append("{}: no dated share float is available; a dated manual value can be entered.".format(symbol))
+            return symbol, value, problems
+
+        # Float access is per-symbol; two workers avoid a burst of 50 requests.
+        # All transport remains under the shared four-request cap.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="nomisma-float") as executor:
+            results = list(executor.map(load_one, symbols))
+        return ({symbol: value for symbol, value, _ in results},
+                [warning for _, _, problems in results for warning in problems])
+
+    def load_snapshots():
+        result = _get_json("https://data.alpaca.markets/v2/stocks/snapshots", {
+            "symbols": ",".join(symbols), "feed": status["feed"]}, headers, stop_event)
+        return result, _now().isoformat()
+
+    # Independent batched price/history requests overlap instead of waiting
+    # for every float lookup. Pagination stays ordered within each history.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="nomisma-seed") as executor:
+        daily_task = executor.submit(screening_history, symbols, session, now,
+                                     status["feed"], headers, stop_event, refresh)
+        minute_task = executor.submit(_history, symbols, session, calendar_days, now,
+                                      status["feed"], headers, stop_event, "1Min")
+        snapshot_task = executor.submit(load_snapshots)
+        float_task = executor.submit(load_floats)
+        tasks = (daily_task, minute_task, snapshot_task, float_task)
+        try:
+            # Surface the first failure and cancel siblings, so unavailable
+            # prices do not wait behind dozens of optional float requests.
+            for task in as_completed(tasks):
+                task.result()
+        except Exception:
+            stop_event.cancelled.set()
+            raise
+        daily, minutes = daily_task.result(), minute_task.result()
+        snapshots, snapshots_received_at = snapshot_task.result()
+        floats, float_warnings = float_task.result()
+    warnings.extend(float_warnings)
+    if (not isinstance(snapshots, dict) or any(key not in symbols for key in snapshots)
+            or any(value is not None and not isinstance(value, dict) for value in snapshots.values())):
         raise ValueError("Alpaca returned invalid stock snapshots.")
+    needs_extended = []
+    for symbol in symbols:
+        raw_day = (snapshots.get(symbol) or {}).get("dailyBar") or {}
+        raw_day = raw_day if isinstance(raw_day, dict) else {}
+        try:
+            stamp = _stamp(raw_day.get("t"))
+            volume = raw_day.get("v")
+            current_day = (stamp <= _now() and stamp.astimezone(_NY).date() == date.fromisoformat(session["date"])
+                           and type(volume) in (int, float) and math.isfinite(volume) and 0 <= volume <= 1e12)
+        except (ValueError, TypeError):
+            current_day = False
+        if not current_day:
+            needs_extended.append(symbol)
+    extended = {}
+    if needs_extended:
+        try:
+            extended = extended_day_volumes(needs_extended, session, _now(), status["feed"], headers, stop_event)
+        except _Cancelled:
+            raise
+        except ValueError:
+            warnings.append("Extended-hours minute volume could not be loaded. Total day volume remains unavailable where no current provider daily bar is present.")
     assets = []
     for symbol in symbols:
         snapshot = snapshots.get(symbol) or {}
         if not isinstance(snapshot, dict):
             raise ValueError("Alpaca returned an invalid stock snapshot.")
         snapshot = dict(snapshot, _received_at=snapshots_received_at)
+        if isinstance(snapshot.get("latestQuote"), dict):
+            # Preserve the actual response receipt through later renders and
+            # history refreshes; quote event time alone is not availability.
+            snapshot["latestQuote"] = dict(snapshot["latestQuote"], _received_at=snapshots_received_at)
+        if symbol in extended:
+            snapshot["_extended_day"] = extended[symbol]
         asset = dict(providers._asset_metadata(symbol), bars=daily[symbol], minutes=minutes[symbol],
                      snapshot=snapshot, float=floats.get(symbol))
         if len(daily[symbol]) < 30:
-            warnings.append("{} has fewer than 30 prior trading sessions; volume baselines and alerts are unavailable.".format(symbol))
+            warnings.append("{} has fewer than 30 prior trading sessions; its 30-session volume baseline is unavailable.".format(symbol))
         assets.append(asset)
     _check_stop(stop_event)
     return {"source": "alpaca", "feed": status["feed"], "as_of": _now().isoformat(),
-            "session": session, "warnings": warnings, "assets": assets}
+            "session": session, "warnings": warnings, "assets": assets, "benchmark_bars": daily.get("SPY", [])}
 
 
 class _NoFloatRedirect(HTTPRedirectHandler):
@@ -297,7 +483,7 @@ class _NoFloatRedirect(HTTPRedirectHandler):
         raise ValueError("FMP returned an unexpected redirect; credentials were not forwarded.")
 
 
-def fetch_float(symbol):
+def fetch_float(symbol, refresh=False):
     """Return actual, provider-dated float shares; never substitute outstanding."""
     symbol = providers._symbol(symbol)
     key = os.environ.get("FMP_API_KEY", "").strip()
@@ -306,7 +492,7 @@ def fetch_float(symbol):
     cache_key = (symbol, hashlib.sha256(key.encode("utf-8")).digest())
     with _FLOAT_LOCK:
         cached = _FLOAT_CACHE.get(cache_key)
-        if cached is not None and time.monotonic() - cached[0] < _FLOAT_TTL:
+        if not refresh and cached is not None and time.monotonic() - cached[0] < _FLOAT_TTL:
             _FLOAT_CACHE.move_to_end(cache_key)
             return dict(cached[1]) if cached[1] is not None else None
     request = Request("https://financialmodelingprep.com/stable/shares-float?" + urlencode({
@@ -539,14 +725,15 @@ def _stream_error(event):
     # Never interpolate upstream text: it may echo credentials or request data.
     meanings = {400: "invalid stream request", 401: "authentication required",
                 402: "authentication failed", 403: "duplicate authentication",
-                404: "authentication timed out", 405: "subscription symbol limit exceeded",
+                404: "authentication timed out", 405: "subscription symbol limit exceeded; reduce the symbol list or check your market-data plan",
                 406: "connection limit exceeded; stop other sessions using this feed",
                 407: "client could not keep up with the stream",
                 409: "real-time feed access requires an eligible data subscription",
                 410: "requested channel is unavailable", 500: "provider internal error"}
     code = event.get("code")
     reason = meanings.get(code, "provider rejected the streaming session") if isinstance(code, int) else "provider rejected the streaming session"
-    return ValueError("Alpaca stream: {}.".format(reason))
+    error_type = LiveSubscriptionLimit if code == 405 else ValueError
+    return error_type("Alpaca stream: {}.".format(reason))
 
 
 def stream_live(symbols, on_event, stop_event, on_status=None):

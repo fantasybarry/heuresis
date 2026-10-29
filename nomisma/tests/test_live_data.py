@@ -1,7 +1,7 @@
 """Offline transport, wire-protocol, provenance and session-boundary tests."""
 
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -9,6 +9,7 @@ import os
 import socket
 import struct
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
@@ -89,6 +90,12 @@ class FakeSocket:
 
 
 class SeedTests(unittest.TestCase):
+    def setUp(self):
+        eligibility = patch("nomisma.instruments.require_stocks")
+        eligibility.start()
+        self.addCleanup(eligibility.stop)
+        live._HISTORY_CACHE.clear()
+
     def fixture(self):
         entries = calendar()
         daily = [bar(entry["date"] + "T04:00:00Z") for entry in entries[-36:]]
@@ -103,7 +110,8 @@ class SeedTests(unittest.TestCase):
             if url.endswith("/calendar"):
                 return entries
             if url.endswith("/snapshots"):
-                return {"ABCD": {"latestTrade": {"t": NOW.isoformat(), "p": 2.05}}}
+                return {"ABCD": {"latestTrade": {"t": NOW.isoformat(), "p": 2.05},
+                                 "dailyBar": {"t": "2025-07-03T04:00:00Z", "v": 120000}}}
             if params["timeframe"] == "1Day":
                 return {"bars": {"ABCD": daily}, "next_page_token": None}
             if "page_token" not in params:
@@ -131,11 +139,32 @@ class SeedTests(unittest.TestCase):
         self.assertTrue(all(item["date"] < "2025-07-03" for item in asset["bars"]))
         history = [params for url, params, headers in calls if url.endswith("/bars")]
         self.assertTrue(all(params["feed"] == "iex" and params["adjustment"] == "split" for params in history))
-        self.assertEqual(history[-1]["page_token"], "second")
+        self.assertEqual([params for params in history if params["timeframe"] == "1Min"][-1]["page_token"], "second")
         self.assertTrue(calls[0][0].startswith("https://paper-api.alpaca.markets/"))
         self.assertIsNone(asset["float"])
         self.assertEqual(asset["snapshot"]["_received_at"], NOW.isoformat())
         self.assertNotIn("private-", json.dumps(bundle))
+
+    @patch.dict(os.environ, ENV, clear=True)
+    @patch.object(live, "_now", return_value=NOW)
+    def test_seed_freezes_quote_response_receipt_without_changing_event_or_sizes(self, now):
+        get, _ = self.fixture()
+        quote = {"t": (NOW - timedelta(seconds=2)).isoformat(), "bp": 2, "ap": 2.01,
+                 "bs": 200, "as": 300}
+
+        def snapshots(url, params, headers):
+            result = get(url, params, headers)
+            if url.endswith("/snapshots"):
+                result["ABCD"]["latestQuote"] = quote
+            return result
+
+        with patch.object(live.providers, "_get_json", side_effect=snapshots):
+            bundle = live.load_live_seed(["ABCD"])
+        frozen = bundle["assets"][0]["snapshot"]["latestQuote"]
+        self.assertEqual(frozen["_received_at"], NOW.isoformat())
+        self.assertEqual(frozen["t"], quote["t"])
+        self.assertEqual(frozen["as"], 300)
+        self.assertNotIn("_received_at", quote)
 
     @patch.dict(os.environ, dict(ENV, ALPACA_PAPER="false"), clear=True)
     @patch.object(live, "_now", return_value=NOW.replace(hour=12))
@@ -147,6 +176,64 @@ class SeedTests(unittest.TestCase):
         self.assertEqual(bundle["assets"][0]["minutes"], [])
         self.assertFalse(any(params.get("timeframe") == "1Min" for url, params, headers in calls))
         self.assertTrue(calls[0][0].startswith("https://api.alpaca.markets/"))
+
+    @patch.dict(os.environ, ENV, clear=True)
+    def test_premarket_seed_uses_extended_minutes_when_daily_snapshot_is_previous_day(self):
+        now = NOW.replace(hour=13, minute=15)
+        get, _ = self.fixture()
+
+        def premarket(url, params, headers):
+            if url.endswith("/snapshots"):
+                return {"ABCD": {"latestTrade": {"t": now.isoformat(), "p": 2.05},
+                                  "dailyBar": {"t": "2025-07-02T04:00:00Z", "v": 999999}}}
+            if params.get("timeframe") == "1Min":
+                return {"bars": {"ABCD": [bar("2025-07-03T08:00:00Z", 100),
+                                            bar("2025-07-03T13:14:00Z", 900)]}}
+            return get(url, params, headers)
+
+        with patch.object(live, "_now", return_value=now), patch.object(live.providers, "_get_json", side_effect=premarket):
+            bundle = live.load_live_seed(["ABCD"])
+        self.assertEqual(bundle["assets"][0]["minutes"], [])
+        self.assertEqual(bundle["assets"][0]["snapshot"]["_extended_day"]["volume"], 1000)
+        self.assertEqual(bundle["assets"][0]["snapshot"]["dailyBar"]["v"], 999999)
+        self.assertIn("benchmark_bars", bundle)
+
+    @patch.dict(os.environ, ENV, clear=True)
+    def test_optional_extended_volume_failure_preserves_prices_but_cancellation_propagates(self):
+        from nomisma.monitor_metrics import build_rows, validate_monitor_config
+        now = NOW.replace(hour=13, minute=15)
+        get, _ = self.fixture()
+
+        def premarket(url, params, headers):
+            if url.endswith("/snapshots"):
+                return {"ABCD": {"latestTrade": {"t": now.isoformat(), "p": 2.05},
+                                  "latestQuote": {"t": now.isoformat(), "bp": 2.04, "ap": 2.06},
+                                  "dailyBar": {"t": "2025-07-02T04:00:00Z", "v": 999999}}}
+            return get(url, params, headers)
+
+        with patch.object(live, "_now", return_value=now), patch.object(live.providers, "_get_json", side_effect=premarket):
+            with patch.object(live, "extended_day_volumes", side_effect=ValueError("Request failed: private-provider-key")):
+                bundle = live.load_live_seed(["ABCD"])
+            result = build_rows(bundle, validate_monitor_config({"source": "alpaca", "symbols": ["ABCD"]}), now)[0]
+            self.assertEqual(result["price"], 2.05)
+            self.assertIsNone(result["day_volume"])
+            self.assertFalse(result["day_volume_fresh"])
+            self.assertFalse(result["alert_eligible"])
+            self.assertIn("Extended-hours minute volume could not be loaded", " ".join(bundle["warnings"]))
+            self.assertNotIn("private-provider-key", json.dumps(bundle))
+            with patch.object(live, "extended_day_volumes", side_effect=live._Cancelled("Stopped")):
+                with self.assertRaises(live._Cancelled):
+                    live.load_live_seed(["ABCD"])
+
+    @patch.dict(os.environ, ENV, clear=True)
+    @patch.object(live, "_now", return_value=NOW)
+    def test_current_provider_daily_volume_does_not_load_or_add_extended_fallback(self, now):
+        get, _ = self.fixture()
+        with patch.object(live.providers, "_get_json", side_effect=get), \
+                patch.object(live, "extended_day_volumes", side_effect=AssertionError("Already have provider total")):
+            bundle = live.load_live_seed(["ABCD"])
+        self.assertNotIn("_extended_day", bundle["assets"][0]["snapshot"])
+        self.assertEqual(bundle["assets"][0]["snapshot"]["dailyBar"]["v"], 120000)
 
     def test_weekend_calendar_selects_most_recent_session(self):
         session, _ = live._session(calendar(), NOW + timedelta(days=2))
@@ -181,6 +268,73 @@ class SeedTests(unittest.TestCase):
         self.assertIn("FMP float could not be loaded", " ".join(bundle["warnings"]))
         self.assertNotIn("fmp-private", json.dumps(bundle))
 
+    @patch.dict(os.environ, ENV, clear=True)
+    @patch.object(live, "_now", return_value=NOW)
+    def test_history_and_snapshots_overlap_without_losing_pagination(self, now):
+        get, calls = self.fixture()
+        barrier = threading.Barrier(3, timeout=2)
+
+        def overlapping(url, params, headers):
+            if url.endswith("/snapshots") or (url.endswith("/bars") and "page_token" not in params):
+                barrier.wait()
+            return get(url, params, headers)
+
+        with patch.object(live.providers, "_get_json", side_effect=overlapping):
+            bundle = live.load_live_seed(["ABCD"])
+        self.assertEqual(len(bundle["assets"][0]["minutes"]), 122)
+        self.assertEqual(sum(params.get("page_token") == "second" for _, params, _ in calls), 1)
+
+    @patch.dict(os.environ, dict(ENV, FMP_API_KEY="private-fmp"), clear=True)
+    @patch.object(live, "_now", return_value=NOW)
+    def test_float_loads_use_two_workers_and_explicit_refresh_bypasses_cache(self, now):
+        get, _ = self.fixture()
+        barrier = threading.Barrier(2, timeout=2)
+        observed = []
+
+        def floating(symbol, refresh):
+            observed.append((symbol, refresh))
+            barrier.wait()
+            return {"shares": 1000, "as_of": "2025-07-02", "source": "FMP"}
+
+        with patch.object(live.providers, "_get_json", side_effect=get), \
+                patch.object(live, "fetch_float", side_effect=floating), patch.object(live, "extended_day_volumes", return_value={}):
+            bundle = live.load_live_seed(["ABCD", "WXYZ"], refresh=True)
+        self.assertCountEqual(observed, [("ABCD", True), ("WXYZ", True)])
+        self.assertTrue(all(asset["float"]["source"] == "FMP" for asset in bundle["assets"]))
+
+    @patch.dict(os.environ, dict(ENV, FMP_API_KEY="private-fmp"), clear=True)
+    @patch.object(live, "_now", return_value=NOW)
+    def test_seed_failure_cancels_siblings_without_stopping_parent_monitor(self, now):
+        get, _ = self.fixture()
+        started, cancelled, parent_stop = threading.Event(), threading.Event(), threading.Event()
+
+        def history(symbols, session, calendar_days, instant, feed, headers, stopped, timeframe, **kwargs):
+            if timeframe == "1Min":
+                started.set()
+                deadline = time.monotonic() + 2
+                while not stopped.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if stopped.is_set():
+                    cancelled.set()
+                live._check_stop(stopped)
+                raise AssertionError("Sibling request was not cancelled")
+            self.assertTrue(started.wait(1))
+            raise ValueError("History unavailable")
+
+        with patch.object(live.providers, "_get_json", side_effect=get), \
+                patch.object(live, "_history", side_effect=history), patch.object(live, "fetch_float", return_value=None):
+            with self.assertRaisesRegex(ValueError, "History unavailable"):
+                live.load_live_seed(["ABCD"], stop_event=parent_stop)
+        self.assertTrue(cancelled.is_set())
+        self.assertFalse(parent_stop.is_set())
+
+    def test_provider_symbol_validation_matches_fifty_symbol_application_limit(self):
+        symbols = ["S%s" % index for index in range(50)]
+        self.assertEqual(live._symbols(symbols), symbols)
+        with self.assertRaisesRegex(ValueError, "50"):
+            live._symbols(symbols + ["EXTRA"])
+        self.assertIn("reduce the symbol list", str(live._stream_error({"code": 405})))
+
     def test_cancellation_returns_before_inflight_http_finishes(self):
         started, release, stopped = threading.Event(), threading.Event(), threading.Event()
         finished = threading.Event()
@@ -207,11 +361,82 @@ class SeedTests(unittest.TestCase):
 
     @patch.dict(os.environ, ENV, clear=True)
     def test_credentials_and_symbols_rejected_before_network(self):
-        for symbols in ([], ["*"] , ["ABCD"] * 21):
+        for symbols in ([], ["*"] , ["ABCD"] * 51):
             with self.subTest(symbols=symbols), self.assertRaises(ValueError):
                 live.load_live_seed(symbols)
         with patch.dict(os.environ, {"ALPACA_FEED": "delayed_sip"}), self.assertRaisesRegex(ValueError, "real-time"):
             live.load_live_seed(["ABCD"])
+
+
+class ScreeningHistoryTests(unittest.TestCase):
+    def setUp(self):
+        live._HISTORY_CACHE.clear()
+        self.session, _ = live._session(calendar(), NOW)
+        self.headers = {"APCA-API-KEY-ID": "mock", "APCA-API-SECRET-KEY": "secret"}
+
+    def test_history_requests400_days_and_spy_excludes_current_weekend_and_future(self):
+        prior = (NOW.date() - timedelta(days=300))
+        while prior.weekday() >= 5:
+            prior -= timedelta(days=1)
+        payload = {"bars": {"ABCD": [bar(prior.isoformat() + "T04:00:00Z"),
+                    bar("2025-06-28T04:00:00Z"), bar("2025-07-03T04:00:00Z"),
+                    bar("2025-07-04T04:00:00Z")], "SPY": [bar("2025-07-02T04:00:00Z")]}}
+        with patch.object(live, "_get_json", return_value=payload) as get:
+            result = live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers)
+        params = get.call_args.args[1]
+        self.assertEqual(params["symbols"], "ABCD,SPY")
+        self.assertEqual(params["adjustment"], "split")
+        self.assertEqual(date.fromisoformat(params["start"][:10]), NOW.date() - timedelta(days=400))
+        self.assertEqual([item["date"] for item in result["ABCD"]], [prior.isoformat()])
+        self.assertEqual(result["SPY"][0]["date"], "2025-07-02")
+
+    def test_history_cache_is_bounded_isolated_and_explicit_refresh_bypasses_it(self):
+        payload = {"bars": {"ABCD": [bar("2025-07-02T04:00:00Z")], "SPY": []}}
+        with patch.object(live, "_get_json", return_value=payload) as get:
+            first = live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers)
+            first["ABCD"][0]["volume"] = 999
+            again = live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers)
+            self.assertEqual(again["ABCD"][0]["volume"], 1000)
+            self.assertEqual(get.call_count, 1)
+            live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers, refresh=True)
+            self.assertEqual(get.call_count, 2)
+            live.screening_history(["ABCD"], self.session, NOW, "sip", self.headers)
+            live.screening_history(["ABCD"], self.session, NOW, "iex", dict(self.headers, **{"APCA-API-KEY-ID": "other"}))
+            self.assertEqual(get.call_count, 4)
+            with patch.object(live, "_HISTORY_CACHE_LIMIT", 3):
+                live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers, refresh=True)
+                self.assertLessEqual(len(live._HISTORY_CACHE), 3)
+
+    def test_history_cache_expires_and_session_change_fetches_again(self):
+        payload = {"bars": {"ABCD": [bar("2025-07-02T04:00:00Z")], "SPY": []}}
+        with patch.object(live, "_get_json", return_value=payload) as get:
+            with patch.object(live.time, "monotonic", return_value=100):
+                live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers)
+            with patch.object(live.time, "monotonic", return_value=100 +live._HISTORY_TTL):
+                live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers)
+                self.assertEqual(get.call_count, 2)
+                session = dict(self.session, date="2025-07-04")
+                live.screening_history(["ABCD"], session, NOW +timedelta(days=1), "iex", self.headers)
+                self.assertEqual(get.call_count, 3)
+
+    def test_extended_volume_spans_premarket_regular_and_deduplicates_overlap(self):
+        opening = bar("2025-07-03T08:00:00Z", 200)
+        regular = bar("2025-07-03T13:30:00Z", 300)
+        payload = {"bars": {"ABCD": [bar("2025-07-03T07:59:00Z", 999), opening, opening, regular,
+                                                bar("2025-07-03T15:32:00Z", 999)]}}
+        with patch.object(live, "_get_json", return_value=payload) as get, patch.object(live, "_now", return_value=NOW):
+            result = live.extended_day_volumes(["ABCD"], self.session, NOW, "iex", self.headers)["ABCD"]
+        self.assertEqual(result["volume"], 500)
+        self.assertEqual(len(result["minutes"]), 2)
+        self.assertEqual(result["received_at"], NOW.isoformat())
+        self.assertEqual(get.call_args.args[1]["start"], "2025-07-03T08:00:00+00:00")
+        self.assertEqual(get.call_args.args[1]["adjustment"], "split")
+
+    def test_failed_or_partial_history_is_not_cached(self):
+        payload = {"bars": {"ABCD": [bar("2025-07-02T04:00:00Z")]}, "next_page_token": "repeat"}
+        with patch.object(live, "_get_json", return_value=payload), self.assertRaisesRegex(ValueError, "repeated"):
+            live.screening_history(["ABCD"], self.session, NOW, "iex", self.headers)
+        self.assertEqual(len(live._HISTORY_CACHE), 0)
 
 
 class FloatTests(unittest.TestCase):
@@ -273,6 +498,18 @@ class FloatTests(unittest.TestCase):
         self.assertNotIn("private-fmp-key", str(caught.exception))
         with self.assertRaises(ValueError):
             live._NoFloatRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example")
+
+    @patch.dict(os.environ, {"FMP_API_KEY": "private-fmp-key"}, clear=True)
+    @patch.object(live, "_now", return_value=NOW)
+    def test_explicit_float_refresh_does_not_reuse_ttl_cache(self, now):
+        first = self.get([{"symbol": "ABCD", "floatShares": 1000, "date": "2025-07-02"}])
+        updated = self.get([{"symbol": "ABCD", "floatShares": 2000, "date": "2025-07-03"}])
+        with patch.object(live, "build_opener", side_effect=[first, updated]):
+            self.assertEqual(live.fetch_float("ABCD")["shares"], 1000)
+            self.assertEqual(live.fetch_float("ABCD")["shares"], 1000)
+            self.assertEqual(live.fetch_float("ABCD", refresh=True)["shares"], 2000)
+        self.assertEqual(first.open.call_count, 1)
+        self.assertEqual(updated.open.call_count, 1)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_unconfigured_float_and_status_do_not_expose_keys(self):
@@ -474,6 +711,33 @@ class StreamTests(unittest.TestCase):
         with patch.object(live, "_WebSocket") as connect:
             live.stream_live(["ABCD"], lambda event: None, stop)
         connect.assert_not_called()
+
+
+class CandleTests(unittest.TestCase):
+    def test_pages_newest_first_and_returns_oldest_first(self):
+        def bar(minute):
+            return {"t": "2025-07-03T15:%02d:00Z" % minute, "o": 2, "h": 3, "l": 1, "c": 2.5, "v": 100}
+        pages = [{"bars": {"AAPL": [bar(3), bar(2)]}, "next_page_token": "next"},
+                 {"bars": {"AAPL": [bar(1)]}, "next_page_token": None}]
+        with patch.dict(os.environ, ENV), patch.object(live, "_get_json", side_effect=pages) as get:
+            result = live.fetch_candles("aapl", "5Min")
+        self.assertEqual([candle["t"] for candle in result["candles"]],
+                         ["2025-07-03T15:0%d:00+00:00" % minute for minute in (1, 2, 3)])
+        self.assertEqual(get.call_args_list[0].args[1]["sort"], "desc")
+        self.assertEqual(get.call_args_list[1].args[1]["page_token"], "next")
+
+    def test_before_cursor_ends_just_before_the_oldest_loaded_bar(self):
+        with patch.dict(os.environ, ENV), patch.object(live, "_get_json", return_value={"bars": {}}) as get:
+            self.assertEqual(live.fetch_candles("AAPL", "1Hour", "2025-07-03T15:00:00+00:00")["candles"], [])
+        self.assertEqual(get.call_args.args[1]["end"], "2025-07-03T14:59:59.999999+00:00")
+
+    def test_rejects_unknown_timeframe_and_invalid_bars(self):
+        with self.assertRaisesRegex(ValueError, "Timeframe"):
+            live.fetch_candles("AAPL", "2Min")
+        bad = {"bars": {"AAPL": [{"t": "2025-07-03T15:00:00Z", "o": 2, "h": 1, "l": 1, "c": 2, "v": 1}]}}
+        with patch.dict(os.environ, ENV), patch.object(live, "_get_json", return_value=bad):
+            with self.assertRaisesRegex(ValueError, "invalid 1Min candle"):
+                live.fetch_candles("AAPL", "1Min")
 
 
 if __name__ == "__main__":

@@ -288,7 +288,7 @@ def build(args: argparse.Namespace) -> Path:
         (resources / "build.json").write_text(json.dumps({"python": runtime, "backend_files": sources}, indent=2) + "\n")
         info = {"CFBundleIdentifier": APP_ID, "CFBundleName": "Nomisma", "CFBundleDisplayName": "Nomisma",
                 "CFBundleExecutable": "Nomisma", "CFBundlePackageType": "APPL", "CFBundleInfoDictionaryVersion": "6.0",
-                "CFBundleShortVersionString": "1.0.0", "CFBundleVersion": "1", "CFBundleIconFile": "Nomisma",
+                "CFBundleShortVersionString": "1.2.4", "CFBundleVersion": "7", "CFBundleIconFile": "Nomisma",
                 "LSMinimumSystemVersion": "13.0", "LSApplicationCategoryType": "public.app-category.finance",
                 "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
                 "NSSupportsAutomaticGraphicsSwitching": True,

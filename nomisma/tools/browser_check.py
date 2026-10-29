@@ -7,6 +7,8 @@ Requires a locally installed Chromium/Chrome; no Python or JS packages needed.
 
 import argparse
 import base64
+import copy
+from datetime import datetime, timedelta, timezone
 import http.client
 import json
 import os
@@ -21,9 +23,11 @@ import threading
 import time
 from urllib.parse import urlparse
 from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nomisma.server import Application, make_handler
+from nomisma.monitor_metrics import demo_bundle
 
 
 class DevTools:
@@ -222,7 +226,494 @@ def check_live(client, app, server_port, output, temporary):
     client.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1050, "deviceScaleFactor": 1, "mobile": False})
 
 
-def run(output, chrome):
+
+METRIC_SORT_FIELDS = ("liquidity_volatility_score", "day_volume", "avg_volume_3m", "avg_daily_volume",
+                      "day_relative_volume", "spread_pct", "beta", "atr", "atr_pct")
+
+
+def check_metric_columns(client, table):
+    expected = ["Avg vol (3M)", "Avg daily vol (20D)", "Day RVOL", "Bid–ask spread", "Beta", "ATR (14)"]
+    assert client.evaluate("%s.every(label => document.querySelector(%s).textContent.includes(label))" %
+                           (json.dumps(expected), json.dumps(table))), "Research metric columns are missing"
+    for metric in ("avg_volume_3m", "avg_daily_volume", "day_relative_volume", "spread_pct", "beta", "atr"):
+        assert client.evaluate("!!document.querySelector(%s)" % json.dumps(table + ' td[data-metric="' + metric + '"]')), metric
+    volume_cell = client.evaluate("document.querySelector(%s)?.outerHTML || null" % json.dumps(table + ' td[data-metric="day_volume"]'))
+    assert client.evaluate("!!document.querySelector(%s)" % json.dumps(table + ' td[data-metric="day_volume"][data-label="Total day volume"]')), "Total day volume label is missing; actual cell: " + repr(volume_cell)
+
+
+def check_candidate_metrics(client, app):
+    """Compare real browser ordering with numeric saved result values."""
+    check_metric_columns(client, ".live-candidate-table")
+    assert client.evaluate("!!document.querySelector('#live-candidate-sort') && !!document.querySelector('.live-ranking-details')")
+    rows = app.discovery_snapshot()["latest"]["result"]["rows"]
+    client.evaluate("Array.from(document.querySelectorAll('[data-live-candidate]')).slice(0,3).forEach(field => field.click())")
+    selected = set(client.evaluate("Array.from(document.querySelectorAll('[data-live-candidate]:checked'), field => field.dataset.liveCandidate)"))
+    for metric in METRIC_SORT_FIELDS:
+        expected = [row["symbol"] for row in sorted(rows, key=lambda row: (
+            row.get(metric) is None, -(row[metric] if row.get(metric) is not None else 0), row["symbol"]))]
+        client.evaluate("document.querySelector('#live-candidate-sort').value = %s; document.querySelector('#live-candidate-sort').dispatchEvent(new Event('change', {bubbles:true}))" % json.dumps(metric))
+        actual = client.evaluate("Array.from(document.querySelectorAll('[data-live-candidate]'), field => field.dataset.liveCandidate)")
+        assert actual == expected, "Candidate numeric sort failed: " + metric
+        assert set(client.evaluate("Array.from(document.querySelectorAll('[data-live-candidate]:checked'), field => field.dataset.liveCandidate)")) == selected, "Sorting changed selected candidates"
+    client.evaluate("document.querySelector('#live-candidate-sort').value = 'liquidity_volatility_score'; document.querySelector('#live-candidate-sort').dispatchEvent(new Event('change', {bubbles:true})); document.querySelectorAll('[data-live-candidate]:checked').forEach(field => field.click())")
+
+
+def check_metric_null_sorting(client, app):
+    """Exercise decimal, zero, and unavailable values in an isolated stopped snapshot."""
+    snapshot = app.monitor.snapshot()
+    assert not snapshot["status"]["running"] and snapshot["rows"]
+    fixture = copy.deepcopy(snapshot)
+    fixture["alerts"] = []
+    fixture["rows"] = []
+    # Alphabetic order deliberately differs from numeric order, and zero must
+    # remain a real value while unavailable data belongs at the bottom.
+    for symbol, value in (("SORTC", 12.5), ("SORTA", 2), ("SORTD", 0), ("SORTB", None)):
+        row = copy.deepcopy(snapshot["rows"][0])
+        row.update(symbol=symbol, name="Synthetic browser sorting fixture",
+                   day_volume_fresh=value is not None, volume_partial=False, day_volume_partial=False)
+        for metric in METRIC_SORT_FIELDS:
+            row[metric] = value
+        fixture["rows"].append(row)
+    fixture["config"]["symbols"] = [row["symbol"] for row in fixture["rows"]]
+    fixture["rows"][0].update(day_volume_fresh=False, day_volume_partial=True)
+    fixture["rows"][1]["day_volume_partial"] = True
+
+    def check_volume_notes(selector):
+        for symbol, expected in (("SORTC", "Stale volume"), ("SORTA", "Partial volume"),
+                                 ("SORTD", ""), ("SORTB", "")):
+            cell = client.evaluate("""(() => {
+              const cell = document.querySelector(%s).closest('tr').querySelector('[data-metric=day_volume]');
+              return {text:cell.textContent, title:cell.title, note:cell.querySelector('small')?.textContent || ''};
+            })()""" % json.dumps(selector % symbol))
+            assert cell['note'] == expected, 'Volume provenance label mismatch: ' + repr((symbol, cell))
+            if symbol == 'SORTC':
+                assert 'no volume or day RVOL ranking points' in cell['title']
+            if symbol == 'SORTB':
+                assert '—' in cell['text'] and 'Unavailable' in cell['title']
+
+    def serve_snapshot(compact=False):
+        result = copy.deepcopy(fixture)
+        if compact:
+            for row in result["rows"]:
+                row.pop("chart", None)
+                row.pop("volume_history", None)
+        return result
+
+    try:
+        with patch.object(app.monitor, "snapshot", side_effect=serve_snapshot):
+            client.call("Page.reload")
+            client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === 4")
+            check_metric_columns(client, ".live-stocks")
+            assert client.evaluate("!document.querySelector('#live-extra-columns').checked && !!document.querySelector('#live-ranking-note')")
+            for metric in METRIC_SORT_FIELDS:
+                client.evaluate("document.querySelector('#live-sort').value = %s; document.querySelector('#live-sort').dispatchEvent(new Event('change'))" % json.dumps(metric))
+                actual = client.evaluate("Array.from(document.querySelectorAll('#live-table [data-live-symbol]'), field => field.dataset.liveSymbol)")
+                assert actual == ["SORTC", "SORTA", "SORTD", "SORTB"], "Radar decimal/zero/null sort failed: " + metric
+            assert client.evaluate("document.querySelector('[data-live-symbol=SORTB]').closest('tr').querySelector('[data-metric=beta]').textContent.includes('—')")
+            assert client.evaluate("!document.querySelector('[data-live-symbol=SORTD]').closest('tr').querySelector('[data-metric=beta]').textContent.includes('—')")
+            client.evaluate("document.querySelector('#live-sort').value = 'symbol'; document.querySelector('#live-sort').dispatchEvent(new Event('change'))")
+            assert client.evaluate("Array.from(document.querySelectorAll('#live-table [data-live-symbol]'), field => field.dataset.liveSymbol)") == ["SORTA", "SORTB", "SORTC", "SORTD"]
+            check_volume_notes('#live-table [data-live-symbol="%s"]')
+
+            candidates = copy.deepcopy(app.discovery_snapshot())
+            candidate_rows = copy.deepcopy(fixture['rows'])
+            for row in candidate_rows[:2]:
+                row.update(volume_partial=True, day_volume_partial=False,
+                           volume_basis='completed_extended_minutes', volume_at='2026-09-11T15:37:00Z',
+                           volume_received_at='2026-09-11T15:45:00Z')
+            candidates.update(job=None, latest={'id':'volume-annotation-fixture', 'running':False,
+                'result':{'source':'demo', 'feed':'synthetic', 'rows':candidate_rows, 'coverage':{}, 'warnings':[]}})
+            with patch.object(app, 'discovery_snapshot', return_value=candidates):
+                client.evaluate("document.querySelector('#live-discover').click()")
+                client.wait("document.querySelectorAll('[data-live-candidate]').length === 4")
+                check_volume_notes('[data-live-candidate="%s"]')
+                title = client.evaluate("document.querySelector('[data-live-candidate=SORTC]').closest('tr').querySelector('[data-metric=day_volume]').title")
+                assert 'Completed minutes through 11:37:00' in title and '11:45:00' not in title, title
+                assert 'partial total may undercount' in title
+                client.evaluate("document.querySelector('#live-discovery-dialog').close()")
+    finally:
+        client.call("Page.reload")
+        client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === %d" % len(snapshot["rows"]))
+    print("PASS candidate/radar metric visibility, numeric ranking, selection persistence, and decimal/zero/null sorting")
+    print("PASS radar/candidate stale and partial volume labels, missing/zero display, and actual fallback-minute provenance")
+
+
+def check_mobile_candidate_scrolling(client, output):
+    """Require usable metric space and reachable columns on a narrow screen."""
+    client.evaluate("document.querySelector('#live-candidate-table-wrapper').scrollIntoView({block:'start'}); document.querySelector('#live-candidate-table-wrapper').scrollTop = 0; document.querySelector('#live-candidate-table-wrapper').scrollLeft = 0")
+    geometry = client.evaluate("""(() => {
+      const viewport = document.querySelector('#live-candidate-table-wrapper');
+      const first = viewport.querySelector('tbody td:first-child');
+      return {viewportWidth:viewport.clientWidth, firstWidth:first.getBoundingClientRect().width,
+              firstPosition:getComputedStyle(first).position};
+    })()""")
+    assert geometry["firstPosition"] != "sticky" or geometry["viewportWidth"] - geometry["firstWidth"] >= 160, "Sticky candidate symbols leave too little room for metrics: " + repr(geometry)
+    client.screenshot(output / "candidate-metrics-mobile-left.png")
+    for metric in ("day_volume", "avg_volume_3m", "avg_daily_volume", "day_relative_volume", "spread_pct", "beta", "atr"):
+        visible = client.evaluate("""(() => {
+          const viewport = document.querySelector('#live-candidate-table-wrapper');
+          const cell = viewport.querySelector('tbody [data-metric=%s]');
+          let box = cell.getBoundingClientRect(), bounds = viewport.getBoundingClientRect();
+          viewport.scrollLeft += box.left - bounds.left - (viewport.clientWidth - box.width) / 2;
+          box = cell.getBoundingClientRect();
+          const first = viewport.querySelector('tbody td:first-child');
+          const left = getComputedStyle(first).position === 'sticky' ? first.getBoundingClientRect().right : bounds.left;
+          return {readable:box.left >= left - 1 && box.right <= bounds.left + viewport.clientWidth + 1,
+                  cellLeft:box.left, cellRight:box.right, visibleLeft:left,
+                  visibleRight:bounds.left + viewport.clientWidth};
+        })()""" % metric)
+        assert visible["readable"], "Mobile candidate metric cannot be read in full: " + metric + " " + repr(visible)
+        if metric == "day_relative_volume":
+            client.screenshot(output / "candidate-metrics-mobile-middle.png")
+    client.evaluate("document.querySelector('#live-candidate-table-wrapper').scrollLeft = document.querySelector('#live-candidate-table-wrapper').scrollWidth")
+    client.screenshot(output / "candidate-metrics-mobile-right.png")
+    client.evaluate("document.querySelector('#live-candidate-table-wrapper').scrollLeft = 0")
+    selection = client.evaluate("""(() => {
+      const field = document.querySelector('[data-live-candidate]');
+      const before = field.checked; field.click(); const after = field.checked; field.click();
+      return {before,after,restored:field.checked};
+    })()""")
+    assert selection["before"] != selection["after"] and selection["restored"] == selection["before"], "Candidate selection stopped working after horizontal scrolling"
+    assert client.evaluate("document.documentElement.scrollWidth <= innerWidth && document.querySelector('#live-discovery-dialog').scrollWidth <= document.querySelector('#live-discovery-dialog').clientWidth"), "Mobile candidate scrolling overflows the page or dialog"
+    print("PASS mobile candidate metrics remain fully readable while scrolling; selection and viewport preserved")
+
+
+def check_workspace_improvements(client, app, output):
+    symbols = ["QA%02d" % index for index in range(51)]
+    client.evaluate("document.querySelector('#live-discover').click()")
+    client.wait("document.querySelector('#live-discovery-dialog').open && !document.querySelector('#live-discovery-fields').disabled")
+    assert client.evaluate("document.querySelector('#live-schedule-time').value === '09:15'")
+    client.evaluate("""(() => {
+      const f = document.querySelector('#live-discovery-form').elements;
+      f.source.value = 'demo'; f.universe.value = 'custom';
+      f.universe.dispatchEvent(new Event('change'));
+      f.symbols.value = %s;
+      f.min_price.value = '0'; f.max_price.value = '1000';
+      f.min_day_volume.value = '0'; f.min_change_pct.value = '-100'; f.limit.value = '100';
+      document.querySelector('#live-schedule-enabled').checked = true;
+      document.querySelector('#live-schedule-form').requestSubmit();
+    })()""" % json.dumps(','.join(symbols)))
+    client.wait("document.querySelector('#live-schedule-summary').textContent.includes('09:15') && !document.querySelector('#live-save-schedule').disabled")
+    assert app.discovery_settings()['schedule'] == {'enabled': True, 'time': '09:15', 'timezone': 'America/New_York'}
+    assert app.settings()['schedule']['enabled'] is False
+    client.evaluate("document.querySelector('#live-discovery-form').requestSubmit()")
+    client.wait("document.querySelectorAll('[data-live-candidate]').length === 51", seconds=20)
+    check_candidate_metrics(client, app)
+    client.evaluate("Array.from(document.querySelectorAll('[data-live-candidate]')).slice(0,50).forEach(field => field.click())")
+    assert client.evaluate("document.querySelector('#live-candidate-selection').textContent.includes('50 of 50') && document.querySelectorAll('[data-live-candidate]')[50].disabled")
+    client.screenshot(output / 'candidate-schedule-desktop.png')
+    client.evaluate("document.querySelector('#live-use-candidates').click()")
+    client.wait("!document.querySelector('#live-discovery-dialog').open")
+    assert len(app.monitor.config['symbols']) == 50
+    assert not app.monitor.status['running']
+    client.call('Page.reload')
+    client.wait("document.querySelector('#live-start') && !document.querySelector('#live-start').disabled")
+    client.evaluate("document.querySelector('#live-discover').click()")
+    client.wait("document.querySelectorAll('[data-live-candidate]').length === 51 && !document.querySelector('#live-discovery-fields').disabled")
+    assert client.evaluate("document.querySelector('#live-schedule-enabled').checked && document.querySelector('#live-schedule-time').value === '09:15'")
+    assert not app.monitor.status['running']
+    client.evaluate("document.querySelector('#live-discovery-dialog').close(); document.querySelector('#live-start').click()")
+    client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === 50", seconds=20)
+    client.wait("!document.querySelector('#live-refresh').disabled")
+    selected = list(app.monitor.config['symbols'])
+    client.evaluate("document.querySelector('#live-refresh').click()")
+    client.wait("document.querySelector('#live-refresh-status').textContent.includes('Data refreshed') && !document.querySelector('#live-refresh').disabled")
+    assert app.monitor.status['running']
+    assert app.monitor.config['symbols'] == selected
+    assert app.monitor.snapshot()['status']['refresh']['state'] == 'completed'
+    compact = app.monitor.snapshot(compact=True)
+    assert all('chart' not in row and 'volume_history' not in row for row in compact['rows'])
+    client.evaluate("document.querySelector('#live-search').value = %s; document.querySelector('#live-search').dispatchEvent(new Event('input'))" % json.dumps(selected[0]))
+    client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === 1")
+    client.evaluate("document.querySelector('#live-search').value = ''; document.querySelector('#live-search').dispatchEvent(new Event('input')); document.querySelector('#live-table [data-live-symbol]').click()")
+    client.wait("document.querySelector('#live-report-data svg') && document.querySelectorAll('#live-history-details tbody tr').length === 30")
+    assert client.evaluate("!document.querySelector('#live-print').disabled")
+    client.evaluate("document.querySelector('#live-report-dialog').close()")
+    assert not client.evaluate("document.documentElement.scrollWidth > innerWidth")
+    client.screenshot(output / 'radar-50-desktop.png')
+    client.call('Emulation.setDeviceMetricsOverride', {'width':390, 'height':844, 'deviceScaleFactor':1, 'mobile':True})
+    assert client.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    client.screenshot(output / 'radar-50-mobile.png')
+    client.evaluate("document.querySelector('#live-discover').click()")
+    client.wait("!document.querySelector('#live-discovery-fields').disabled")
+    assert client.evaluate("document.querySelector('#live-discovery-dialog').scrollWidth <= document.querySelector('#live-discovery-dialog').clientWidth")
+    client.screenshot(output / 'candidate-schedule-mobile.png')
+    check_mobile_candidate_scrolling(client, output)
+    client.evaluate("document.querySelector('#live-discovery-dialog').close(); document.querySelector('#live-stop').click()")
+    client.wait("document.querySelector('#live-connection').textContent.includes('stopped')")
+    assert client.evaluate("document.querySelector('#live-refresh').disabled")
+    client.evaluate("document.querySelector('#live-config').click(); document.querySelector('#live-symbols').value = %s; document.querySelector('#live-config-form').requestSubmit()" % json.dumps(','.join(symbols)))
+    client.wait("document.querySelector('#live-config-error').textContent.includes('50 unique symbols')")
+    client.evaluate("document.querySelector('#live-config-dialog').close()")
+    client.call('Emulation.setDeviceMetricsOverride', {'width':1440, 'height':1050, 'deviceScaleFactor':1, 'mobile':False})
+    check_metric_null_sorting(client, app)
+    print('PASS saved candidate schedule/results, 50-symbol selection/radar, refresh, compact reports, 51-symbol rejection, and mobile layouts')
+
+
+def check_alert_source_isolation(client, app, output):
+    """Persist both sources without starting a market connection or altering earlier fixtures."""
+    url = client.evaluate("location.href")
+    capture = client.call('Page.addScriptToEvaluateOnNewDocument', {'source': """
+      window.alertAckRequests = [];
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input, options) => {
+        if (String(input).includes('/api/monitor/alerts/ack') && options?.body) {
+          window.alertAckRequests.push(JSON.parse(options.body));
+        }
+        return originalFetch(input, options);
+      };
+    """})['identifier']
+    client.call('Page.navigate', {'url':'about:blank'})
+    with tempfile.TemporaryDirectory(prefix='nomisma-alert-browser-') as temporary:
+        isolated = Application(Path(temporary) / 'data')
+        isolated.monitor.save_config({'source':'alpaca', 'symbols':['MARKETA', 'MARKETB']})
+
+        def save_alert(identifier, source, symbol, fresh=False):
+            when = datetime.now(timezone.utc) - (timedelta() if fresh else timedelta(minutes=5))
+            isolated.store.save_monitor_alert({
+                'id':identifier, 'created_at':when.isoformat(), 'market_time':when.isoformat(),
+                'session_date':when.date().isoformat(), 'source':source,
+                'feed':'synthetic' if source == 'demo' else 'sip', 'symbol':symbol,
+                'level':'Buy', 'price':2.5, 'score':75, 'reasons':[], 'acknowledged':False,
+            }, {})
+
+        def inbox(ids, unread, source):
+            expression = """JSON.stringify(Array.from(document.querySelectorAll(
+              '#live-alerts [data-live-alert]'), el => el.dataset.liveAlert).sort()) === %s
+              && document.querySelector('#live-alert-count').textContent.trim() === %s""" % (
+                  json.dumps(json.dumps(sorted(ids), separators=(',', ':'))), json.dumps(str(unread)))
+            client.wait(expression)
+            assert client.evaluate("document.querySelector('#live-ack-all').disabled") == (unread == 0)
+            text = client.evaluate("document.querySelector('#live-alerts').textContent")
+            note = client.evaluate("document.querySelector('#live-notification-note').textContent")
+            if source == 'alpaca':
+                assert 'Synthetic demo' not in text and 'Demo alerts are synthetic' not in note
+                assert 'Alpaca setups' in note
+            else:
+                assert 'Demo alerts are synthetic' in note
+
+        def switch_source(source):
+            client.evaluate("""document.querySelector('#live-config').click();
+              document.querySelector('#live-source').value = %s;
+              document.querySelector('#live-source').dispatchEvent(new Event('change', {bubbles:true}));
+              document.querySelector('#live-config-form').requestSubmit();""" % json.dumps(source))
+            client.wait("!document.querySelector('#live-config-dialog').open")
+            assert isolated.monitor.config['source'] == source
+            assert not isolated.monitor.status['running']
+
+        def mark_all(source, ids):
+            client.evaluate("document.querySelector('#live-ack-all').click()")
+            inbox(ids, 0, source)
+            assert client.evaluate('alertAckRequests.at(-1)') == {'all':True, 'source':source}
+            assert all(isolated.store.monitor_alert(identifier)['acknowledged'] for identifier in ids)
+
+        try:
+            with patch.object(app, 'store', isolated.store), patch.object(app, 'monitor', isolated.monitor):
+                save_alert('source-demo-a', 'demo', 'DEMOSA')
+                save_alert('source-demo-b', 'demo', 'DEMOSB')
+                client.call('Page.navigate', {'url':url})
+                client.wait("document.querySelector('#live-alerts h3')?.textContent === 'No market alerts yet'")
+                inbox([], 0, 'alpaca')
+                client.evaluate("document.querySelector('#live-alerts').scrollIntoView({block:'center'})")
+                client.screenshot(output / 'alpaca-inbox-demo-history-hidden.png')
+
+                save_alert('source-market-a', 'alpaca', 'MARKETA')
+                save_alert('source-market-b', 'alpaca', 'MARKETB')
+                market_ids = ['source-market-a', 'source-market-b']
+                demo_ids = ['source-demo-a', 'source-demo-b']
+                inbox(market_ids, 2, 'alpaca')
+                switch_source('demo')
+                inbox(demo_ids, 2, 'demo')
+                switch_source('alpaca')
+                inbox(market_ids, 2, 'alpaca')
+                mark_all('alpaca', market_ids)
+                assert not any(isolated.store.monitor_alert(identifier)['acknowledged'] for identifier in demo_ids)
+                switch_source('demo')
+                inbox(demo_ids, 2, 'demo')
+                mark_all('demo', demo_ids)
+                switch_source('alpaca')
+                inbox(market_ids, 0, 'alpaca')
+
+                # Simulate a cached/older backend that sends mixed alerts and a stale
+                # status source. The UI must use config.source for all alert behavior.
+                original_snapshot = isolated.monitor.snapshot
+                phase = {'message':'Mixed-source baseline'}
+
+                def mixed_snapshot(*args, **kwargs):
+                    result = original_snapshot(*args, **kwargs)
+                    result['alerts'] = isolated.store.monitor_alerts()
+                    result['status'].update(running=True, connection='live', message=phase['message'],
+                                            source='demo' if result['config']['source'] == 'alpaca' else 'alpaca')
+                    return result
+
+                with patch.object(isolated.monitor, 'snapshot', mixed_snapshot):
+                    client.call('Page.reload')
+                    client.wait("document.querySelector('#live-status-message')?.textContent === 'Mixed-source baseline'")
+                    inbox(market_ids, 0, 'alpaca')
+                    announcement = client.evaluate("document.querySelector('#live-announcement').textContent")
+                    save_alert('source-demo-new', 'demo', 'DEMOSNEW', fresh=True)
+                    phase['message'] = 'Hidden demo alert received'
+                    client.wait("document.querySelector('#live-status-message').textContent === 'Hidden demo alert received'")
+                    inbox(market_ids, 0, 'alpaca')
+                    assert client.evaluate("document.querySelector('#live-announcement').textContent") == announcement
+
+                    # Changing source must establish a baseline, even when previously
+                    # hidden records are recent enough to qualify for notifications.
+                    isolated.monitor.save_config({'source':'demo'})
+                    phase['message'] = 'Demo source selected'
+                    client.wait("document.querySelector('#live-status-message').textContent === 'Demo source selected'")
+                    inbox(demo_ids + ['source-demo-new'], 1, 'demo')
+                    assert client.evaluate("document.querySelector('#live-announcement').textContent") == announcement
+                    isolated.monitor.save_config({'source':'alpaca'})
+                    phase['message'] = 'Alpaca source selected'
+                    client.wait("document.querySelector('#live-status-message').textContent === 'Alpaca source selected'")
+                    inbox(market_ids, 0, 'alpaca')
+                    save_alert('source-market-new', 'alpaca', 'MARKETNEW', fresh=True)
+                    phase['message'] = 'New Alpaca alert received'
+                    client.wait("document.querySelector('#live-announcement').textContent.includes('MARKETNEW')")
+                    inbox(market_ids + ['source-market-new'], 1, 'alpaca')
+                    client.evaluate("document.querySelector('#live-alerts').scrollIntoView({block:'center'})")
+                    client.screenshot(output / 'alpaca-inbox-mixed-source-filtered.png')
+
+                client.evaluate("document.querySelector('#live-journal').click()")
+                client.wait("document.querySelectorAll('#live-journal-results [data-live-alert]').length === 6")
+                journal_ids = client.evaluate("Array.from(document.querySelectorAll('#live-journal-results [data-live-alert]'), el => el.dataset.liveAlert)")
+                assert set(journal_ids) == set(market_ids + demo_ids + ['source-demo-new', 'source-market-new'])
+                journal = client.evaluate("document.querySelector('#live-journal-results').textContent")
+                assert 'Synthetic demo' in journal and 'Alpaca' in journal
+                assert isolated.store.monitor_alerts_total() == 6
+                client.screenshot(output / 'research-journal-both-alert-sources.png')
+                assert not isolated.monitor.status['running'], 'The fixture must never start a provider connection.'
+        finally:
+            client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier':capture})
+            client.call('Page.navigate', {'url':url})
+            client.wait("document.querySelector('#live-start') && !document.querySelector('#live-start').disabled")
+            isolated.stop_event.set()
+            isolated.monitor.close()
+    print('PASS source-specific alert inbox/counts/copy, source switching, scoped Mark read, mixed-source journal, and old-backend notification isolation')
+
+
+def check_alert_refresh(client, app, output):
+    """Explicit refresh must work even when the background event stream is idle."""
+    url = client.evaluate('location.href')
+    shim = client.call('Page.addScriptToEvaluateOnNewDocument', {'source': """
+      window.EventSource = class {
+        constructor() { this.readyState = 1; }
+        addEventListener() {}
+        close() { this.readyState = 2; }
+      };
+      const originalFetch = window.fetch.bind(window);
+      window.alertRefreshChecks = {requests:[], hold:false, fail:false, release:null};
+      window.fetch = async (input, options) => {
+        const checks = window.alertRefreshChecks;
+        const path = new URL(String(input), location.href).pathname;
+        checks.requests.push({path, method:options?.method || 'GET'});
+        if (path === '/api/monitor') {
+          if (checks.hold) await new Promise(resolve => { checks.release = resolve; });
+          if (checks.fail) throw new Error('Alert refresh test failure');
+        }
+        return originalFetch(input, options);
+      };
+    """})['identifier']
+    client.call('Page.navigate', {'url':'about:blank'})
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    with tempfile.TemporaryDirectory(prefix='nomisma-refresh-browser-') as temporary:
+        isolated = Application(Path(temporary) / 'data')
+        isolated.monitor.save_config({'source':'demo', 'symbols':['REFRESHQA']})
+        isolated.monitor.bundle = demo_bundle(['REFRESHQA'], step=3)
+        isolated.monitor.status.update(running=True, connection='demo', source='demo', feed='synthetic',
+                                       session=isolated.monitor.bundle['session'])
+        original_worker = isolated.monitor._refresh_worker
+
+        def delayed_refresh(*args):
+            entered.set()
+            try:
+                if release.wait(15):
+                    original_worker(*args)
+            finally:
+                finished.set()
+
+        def save_alert(identifier):
+            when = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+            isolated.store.save_monitor_alert({
+                'id':identifier, 'created_at':when, 'market_time':when,
+                'session_date':when[:10], 'source':'demo', 'feed':'synthetic', 'symbol':'REFRESHQA',
+                'level':'Buy', 'price':2.5, 'score':75, 'reasons':[], 'acknowledged':False,
+            }, {})
+
+        def inbox(ids):
+            client.wait("JSON.stringify(Array.from(document.querySelectorAll('#live-alerts [data-live-alert]'), el => el.dataset.liveAlert).sort()) === %s && document.querySelector('#live-alert-count').textContent.trim() === %s" %
+                        (json.dumps(json.dumps(sorted(ids), separators=(',', ':'))), json.dumps(str(len(ids)))))
+
+        try:
+            with patch.object(app, 'store', isolated.store), patch.object(app, 'monitor', isolated.monitor), \
+                    patch.object(isolated.monitor, '_refresh_worker', side_effect=delayed_refresh):
+                client.call('Page.navigate', {'url':url.split('#')[0] + '#live'})
+                client.wait("document.querySelector('#live-refresh') && !document.querySelector('#live-refresh').disabled")
+                inbox([])
+                client.evaluate("alertRefreshChecks.requests = []; document.querySelector('#live-refresh').click()")
+                assert entered.wait(2), 'Provider refresh worker did not start'
+                client.wait("document.querySelector('#live-refresh').disabled && document.querySelector('#live-refresh').textContent.includes('Refreshing')")
+                save_alert('during-provider-refresh')
+                inbox([])
+                release.set()
+                client.wait("!document.querySelector('#live-refresh').disabled && document.querySelector('#live-refresh-status').textContent.includes('Data refreshed')", seconds=20)
+                inbox(['during-provider-refresh'])
+                assert isolated.monitor.refresh_status['state'] == 'completed'
+                assert isolated.monitor.status['running'] and isolated.monitor.config['symbols'] == ['REFRESHQA']
+                requests = client.evaluate('alertRefreshChecks.requests')
+                assert sum(item['path'] == '/api/monitor/refresh' for item in requests) == 1
+                assert any(item['path'] == '/api/monitor' for item in requests), 'Completion depended on SSE instead of explicit polling'
+
+                client.evaluate("document.querySelector('#live-stop').click()")
+                client.wait("document.querySelector('#live-connection').textContent.includes('stopped')")
+                assert client.evaluate("!document.querySelector('#live-alert-refresh').disabled")
+                save_alert('stopped-inbox-refresh')
+                inbox(['during-provider-refresh'])
+                client.evaluate("""alertRefreshChecks.requests = []; alertRefreshChecks.hold = true;
+                  const button = document.querySelector('#live-alert-refresh');
+                  button.click(); button.click();
+                  button.dispatchEvent(new MouseEvent('click', {bubbles:true}));""")
+                client.wait('alertRefreshChecks.release !== null')
+                assert client.evaluate("document.querySelector('#live-alert-refresh').disabled && document.querySelector('#live-alert-refresh').getAttribute('aria-busy') === 'true'")
+                assert client.evaluate("alertRefreshChecks.requests.filter(item => item.path === '/api/monitor').length") == 1
+                client.evaluate('alertRefreshChecks.hold = false; alertRefreshChecks.release()')
+                inbox(['during-provider-refresh', 'stopped-inbox-refresh'])
+                client.wait("!document.querySelector('#live-alert-refresh').disabled && document.querySelector('#live-alert-refresh-status').textContent.includes('Checked') && document.querySelector('#live-alert-refresh-status').textContent.includes('1 new setup')")
+                assert client.evaluate("document.querySelector('#live-alert-refresh').getAttribute('aria-busy') === 'false'")
+                assert client.evaluate("alertRefreshChecks.requests.filter(item => item.path === '/api/monitor').length") == 1
+                assert client.evaluate("alertRefreshChecks.requests.every(item => item.method === 'GET')")
+                assert not isolated.monitor.status['running']
+                assert isolated.monitor.config['symbols'] == ['REFRESHQA']
+                client.evaluate("document.querySelector('#live-alert-refresh').click()")
+                client.wait("!document.querySelector('#live-alert-refresh').disabled && document.querySelector('#live-alert-refresh-status').textContent.includes('No new setups')")
+
+                before = client.evaluate("document.querySelector('#live-alerts').innerHTML")
+                client.evaluate("alertRefreshChecks.fail = true; document.querySelector('#live-alert-refresh').click()")
+                client.wait("!document.querySelector('#live-alert-refresh').disabled && (document.querySelector('#live-error').textContent + document.querySelector('#live-alert-refresh-status').textContent).includes('Alert refresh test failure')")
+                assert client.evaluate("document.querySelector('#live-alerts').innerHTML") == before
+                save_alert('retry-inbox-refresh')
+                client.evaluate("alertRefreshChecks.fail = false; document.querySelector('#live-alert-refresh').click()")
+                inbox(['during-provider-refresh', 'stopped-inbox-refresh', 'retry-inbox-refresh'])
+                client.wait("!document.querySelector('#live-alert-refresh').disabled && document.querySelector('#live-alert-refresh-status').textContent.includes('1 new setup')")
+                assert client.evaluate("document.querySelector('#live-error').classList.contains('hidden')")
+                assert not isolated.monitor.status['running']
+                assert isolated.store.monitor_alerts_total() == 3
+                client.evaluate("document.querySelector('#live-alerts').scrollIntoView({block:'center'})")
+                client.screenshot(output / 'setup-alert-refresh.png')
+        finally:
+            release.set()
+            if entered.is_set():
+                assert finished.wait(3), 'Refresh fixture worker did not stop'
+            client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier':shim})
+            client.call('Page.navigate', {'url':url})
+            client.wait("document.querySelector('#live-start') && !document.querySelector('#live-start').disabled")
+            isolated.stop_event.set()
+            isolated.monitor.close()
+    print('PASS explicit Refresh data completion without SSE, alerts saved during refresh, stopped inbox Refresh, duplicate suppression, failure preservation, and retry')
+
+
+def run(output, chrome, alerts_only=False):
     with tempfile.TemporaryDirectory(prefix="nomisma-browser-") as temporary:
         app = Application(Path(temporary) / "data")
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
@@ -252,7 +743,18 @@ def run(output, chrome):
             client.call("Page.enable")
             client.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1050, "deviceScaleFactor": 1, "mobile": False})
             output.mkdir(parents=True, exist_ok=True)
+            if alerts_only:
+                client.call('Page.navigate', {'url':'http://127.0.0.1:%d/#live' % server.server_port})
+                client.wait("document.querySelector('#live-start') && !document.querySelector('#live-start').disabled")
+                check_alert_refresh(client, app, output)
+                check_alert_source_isolation(client, app, output)
+                assert not client.errors, 'Browser errors: ' + json.dumps(client.errors)
+                print('PASS no uncaught JavaScript or browser resource errors')
+                return
             check_live(client, app, server.server_port, output, temporary)
+            check_workspace_improvements(client, app, output)
+            check_alert_refresh(client, app, output)
+            check_alert_source_isolation(client, app, output)
             client.call("Page.navigate", {"url": "http://127.0.0.1:%d/#dashboard" % server.server_port})
             client.wait("document.querySelectorAll('#results-table [data-stock]').length > 0")
             assert client.evaluate("!document.querySelector('#demo-banner').classList.contains('hidden')")
@@ -375,5 +877,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("../../artifacts/nomisma"))
     parser.add_argument("--chrome", default=shutil.which("google-chrome") or shutil.which("chromium") or "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    parser.add_argument("--alerts-only", action="store_true", help="Run only the isolated alert refresh and source regressions.")
     args = parser.parse_args()
-    run(args.output.resolve(), args.chrome)
+    run(args.output.resolve(), args.chrome, alerts_only=args.alerts_only)

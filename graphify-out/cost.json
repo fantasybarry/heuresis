@@ -1,0 +1,16 @@
+{
+  "runs": [
+    {
+      "date": "2026-09-21T17:19:30.393188+00:00",
+      "input_tokens": null,
+      "output_tokens": null,
+      "token_usage_status": "unavailable",
+      "files": 116,
+      "note": "Host-agent usage was not supplied by the collaboration tool. AST uses zero LLM tokens."
+    }
+  ],
+  "total_input_tokens": 0,
+  "total_output_tokens": 0,
+  "unmeasured_runs": 1,
+  "totals_are_complete": false
+}

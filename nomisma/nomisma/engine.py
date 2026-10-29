@@ -61,12 +61,13 @@ _BOOLEAN_FIELDS = ("above_sma50", "above_sma200", "positive_macd")
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9./-]{0,14}\Z")
 
 
-def _finite_number(value):
+def _number(value, minimum=0, maximum=1e15):
+    """True for a finite non-bool int/float within [minimum, maximum]."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     try:
-        return math.isfinite(value)
-    except (OverflowError, TypeError):
+        return math.isfinite(value) and minimum <= value <= maximum
+    except (OverflowError, ValueError):
         return False
 
 
@@ -81,7 +82,7 @@ def validate_filters(filters):
     result.update(filters)
     for key, (minimum, maximum) in _BOUNDS.items():
         value = result[key]
-        if not _finite_number(value) or not minimum <= value <= maximum:
+        if not _number(value, minimum, maximum):
             raise ValueError("{} must be a finite number between {} and {}.".format(key, minimum, maximum))
     for key in _BOOLEAN_FIELDS:
         if not isinstance(result[key], bool):
@@ -135,7 +136,7 @@ def _validated_bars(raw, cutoff):
         for key in ("open", "high", "low", "close", "volume"):
             value = item.get(key)
             maximum = 1000000000000000 if key == "volume" else 1000000000
-            if not _finite_number(value) or not 0 <= value <= maximum:
+            if not _number(value, 0, maximum):
                 raise ValueError("Invalid {} value.".format(key))
             if key != "volume" and value < 0.000001:
                 raise ValueError("OHLC prices must be at least $0.000001.")
@@ -411,7 +412,7 @@ def screen(dataset, filters):
         except (ArithmeticError, ValueError):
             rejected["invalid_data"] += 1
             continue
-        if any(value is not None and not _finite_number(value) for value in metrics.values()):
+        if any(value is not None and not _number(value, -math.inf, math.inf) for value in metrics.values()):
             rejected["invalid_data"] += 1
             continue
         signals = _signals(bars, metrics)

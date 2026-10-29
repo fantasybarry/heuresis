@@ -131,6 +131,10 @@ class CalendarTests(unittest.TestCase):
 
 class AlpacaTests(unittest.TestCase):
     def setUp(self):
+        eligibility = patch("nomisma.instruments.stock_symbols")
+        allowed = eligibility.start().return_value
+        allowed.__contains__.return_value = True
+        self.addCleanup(eligibility.stop)
         self.env = patch.dict(os.environ, ENV, clear=True)
         self.env.start()
         self.clock = patch.object(p, "_now", return_value=NOW)
@@ -176,7 +180,7 @@ class AlpacaTests(unittest.TestCase):
     def test_all_filters_assets_and_batches_without_hiding_missing_data(self):
         listing = [
             {"symbol": "AAPL", "name": "Apple Inc.", "status": "active", "tradable": True, "exchange": "NASDAQ", "class": "us_equity"},
-            {"symbol": "ZZZZ", "name": "Example ETF", "status": "active", "tradable": True, "exchange": "ARCA", "class": "us_equity"},
+            {"symbol": "ZZZZ", "name": "Example Common Stock", "status": "active", "tradable": True, "exchange": "ARCA", "class": "us_equity"},
             {"symbol": "NOPE", "status": "inactive", "tradable": True, "exchange": "NYSE"},
             {"symbol": "OTCS", "status": "active", "tradable": True, "exchange": "OTC"},
             {"symbol": "HALT", "status": "active", "tradable": False, "exchange": "AMEX"},
@@ -197,9 +201,20 @@ class AlpacaTests(unittest.TestCase):
         self.assertEqual(batches, ["AAPL,SPY", "ZZZZ"])
         self.assertEqual([asset["symbol"] for asset in data["assets"]], ["AAPL", "ZZZZ"])
         self.assertEqual(data["assets"][1]["bars"], [])
-        self.assertTrue(any("include ETFs" in warning for warning in data["warnings"]))
+        self.assertTrue(any("stocks-only" in warning for warning in data["warnings"]))
         self.assertTrue(any("No completed bars" in warning for warning in data["warnings"]))
         self.assertTrue(any("Sector classifications" in warning for warning in data["warnings"]))
+
+    def test_custom_daily_symbols_exclude_funds_but_keep_benchmark(self):
+        def response(url, params, headers):
+            if url.endswith("calendar"):
+                return CALENDAR
+            self.assertEqual(params["symbols"], "AAPL,SPY")
+            return {"bars": {symbol: [raw_bar()] for symbol in ("AAPL", "SPY")}, "next_page_token": None}
+        with patch("nomisma.instruments.stock_symbols", return_value={"AAPL"}), patch.object(p, "_get_json", side_effect=response):
+            data = p.fetch_alpaca("custom", ["AAPL", "MSTZ"])
+        self.assertEqual([a["symbol"] for a in data["assets"]], ["AAPL"])
+        self.assertEqual(data["benchmark"]["symbol"], "SPY")
 
     def test_repeated_token_or_conflicting_bars_abort(self):
         for pages in (

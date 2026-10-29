@@ -1,6 +1,6 @@
 # Nomisma
 
-Nomisma is Heuresis's first project: a local research workspace focused on **intraday penny-stock momentum**. Monitor up to 20 US exchange-listed symbols, inspect prices and volume, and receive explainable Buy / Strong buy setup alerts. The daily screener, watchlist, presets, scan history, and CSV workflow remain available separately.
+Nomisma is Heuresis's first project: a local research workspace focused on **intraday penny-stock momentum**. Monitor up to 50 US exchange-listed symbols, inspect prices and volume, and receive explainable Buy / Strong buy setup alerts. The daily screener, watchlist, presets, scan history, and CSV workflow remain available separately.
 
 ## Start
 
@@ -44,11 +44,19 @@ ALPACA_PAPER=true
 FMP_API_KEY=
 ```
 
-Restart Nomisma, open the monitor's **Configure** dialog, select **Alpaca**, replace the synthetic tickers with the real symbols you want to follow, save, then click **Start**. You can also populate the list from your watchlist or the top 20 results of a daily scan. Live monitoring supports at most 20 symbols at once; it is not a whole-market streaming scanner. OTC coverage is not provided by the live IEX/SIP monitor.
+Restart Nomisma, open the monitor's **Configure** dialog, select **Alpaca**, replace the synthetic tickers with the real symbols you want to follow, save, then click **Start**. You can also populate the list from your watchlist or the top 50 results of a daily scan. Live monitoring supports at most 50 symbols at once. OTC coverage is not provided by the live IEX/SIP monitor.
+
+Your market-data plan also limits simultaneous subscriptions. Alpaca's Basic plan supports 30 streamed symbols; monitoring more requires an eligible plan. Nomisma reports a rejected subscription and keeps your configured list for correction. [Alpaca market-data plans](https://docs.alpaca.markets/us/docs/about-market-data-api)
+
+Alpaca allows one live stream per account. To monitor on two machines at once, run the shared data pool: see [Sharing one Alpaca feed between two machines](POOL_SETUP.md).
 
 Environment variables take precedence over `.env`. Use `ALPACA_PAPER=false` for credentials belonging to a live account; this chooses the account host for calendar and metadata requests. Credentials remain on the server and `.env` is ignored by Git. Nomisma reads market data and subscribes to the price stream; it contains no trading or order-execution endpoints.
 
 The monitor loads the exchange calendar, prior daily bars, current quotes, and completed regular-session minute history, then authenticates and subscribes to Alpaca's real-time WebSocket stream. It receives trades, quotes, minute bars, revised bars, and daily aggregate updates. **Live** appears only after authentication and subscription acknowledgments. A failure remains visible and triggers reconnection with refreshed history; it never silently switches to synthetic or delayed data. Minute history is also reconciled while connected to repair gaps around connection boundaries. The browser receives local server-sent events (SSE), with updates throttled to roughly one per second; if that browser connection fails, it can poll every two seconds. The upstream price source remains the Alpaca stream.
+
+Independent history requests load concurrently, and the radar receives smaller updates while full chart and volume history load when you open a stock report. **Refresh data** reloads the connected monitor's quotes, minute history, daily volume baselines, and optional provider float data in the background. The existing stream continues, newer stream values are preserved, and saved alert confirmation and cooldown state stay intact. Refresh is available while connected or running the synthetic demo; demo refresh recomputes its current simulated minute. Progress and failures appear beside the monitor controls. Refresh does not reload credentials or rerun candidate searches and the daily screener; those have their own controls.
+
+**Refresh data** also checks completion directly and reloads saved setup alerts, even if browser streaming is interrupted. **Refresh** inside **Setup alerts** checks the saved feed independently, including while the monitor is stopped, and shows the check time and whether new setups appeared. Alert cards retain their original price, score, and signal time; refreshing does not create or replay alerts. New alerts still require qualifying completed minutes and your confirmation rules.
 
 Alpaca's `iex` feed covers one exchange. Its volume is not consolidated US-market volume, and sparse IEX minute history can leave session totals or alerts unavailable. `sip` provides consolidated coverage when your account has the necessary **real-time data entitlement**; Nomisma does not substitute delayed SIP. Choose liquidity thresholds with the selected feed's coverage in mind. [Alpaca data feeds](https://docs.alpaca.markets/us/docs/historical-stock-data-1), [real-time stock data](https://docs.alpaca.markets/us/docs/real-time-stock-pricing-data)
 
@@ -56,23 +64,37 @@ Automated provider tests use simulated responses; they have not verified your ac
 
 ## Intraday workflow and reports
 
-The default radar keeps the symbol, price/change, setup score, minute RVOL, spread, and eligibility together. Optional volume columns expose the detailed history metrics. Eligibility explains the main blocking condition; confirmation progress counts completed eligible minute bars independently of the technical score. A score above the Buy threshold does not override missing data, a wide spread, or any other guard.
+The default radar shows **total day volume**, average volume over **63 prior sessions (3M)**, average daily volume over **20 prior sessions**, **day RVOL**, the **bid–ask spread in dollars and percent**, **beta versus SPY**, and **daily ATR(14) in dollars and percent**. Total day volume includes available premarket trading and continues accumulating after the open; it is separate from regular-session volume. If the provider has no current daily aggregate, available completed extended-hours minute volume may appear as an explicitly labeled partial fallback. The chosen market feed determines coverage.
+
+Day RVOL compares total day volume with the 20-session average and is not adjusted for time of day. Beta uses up to 252 aligned daily price returns versus SPY, requiring at least 60; its observation count is available in the stock report. ATR uses Wilder's 14-period smoothing on prior completed daily bars, and ATR percentage supports comparison across stock prices. Missing history or unusable quotes remain unavailable. [Metric definitions and ranking weights](METHODOLOGY.md#liquidity-and-volatility-metrics)
+
+The default **liquidity/volatility ranking** combines relative total volume, average volumes, day RVOL, narrower spreads, positive beta, and ATR percentage. Missing components earn zero without hiding the stock. Open the ranking explanation to inspect its weights and availability; choose any metric to sort its raw values high to low, with unavailable values last. A higher raw spread means a wider spread even though the composite rewards narrower spreads. Scores compare the current group and may change as that group changes. The ranking favors activity and volatility; it does not predict direction or returns.
+
+The independent technical setup score, minute RVOL, and eligibility remain available. Eligibility explains the main blocking condition; confirmation progress counts completed eligible minute bars independently of either score. A high ranking or Buy score does not override missing data, a wide spread, or any other alert guard. Additional columns expose legacy volume and technical details.
 
 The stock report overlays session VWAP and EMA9/EMA20 on completed minute prices, with minute volume and saved-alert markers. Gaps and unavailable indicators stay unavailable. The chart uses the same completed-bar calculations as the score.
 
 **Test connection** runs a read-only diagnostic and reports its results separately from monitor control. It checks the configured source, provider access, timestamps, and history coverage. An already-running market stream supplies subscription evidence; a stopped monitor can be tested with a temporary bounded connection. A diagnostic does not save alerts or start an ongoing monitor.
 
-**Find candidates** searches a selected universe using current-session snapshots, price, day change, and feed-day volume. Review the source, feed coverage, market phase, refresh time, and each result's freshness before selecting up to 20 symbols. Applying a selection requires a stopped monitor and saves its configuration; it does not start monitoring. Discovery is a snapshot search, not a continuous whole-market stream. Synthetic discovery results remain explicitly synthetic. Real-source failures are never replaced with demo data.
+**Find candidates** searches a selected universe using current-session snapshots, price, day change, and total day volume. It enriches up to 500 qualifying stocks with the highest total day volume, ranks that group, and reports its coverage before applying your result limit. Review the source, feed coverage, market phase, refresh time, and each result's freshness before selecting up to 50 symbols. You can sort the same displayed metrics as the radar, and selections survive sorting. Applying a selection requires a stopped monitor and saves its configuration; it does not start monitoring. Discovery is a snapshot search, not a continuous whole-market stream. Synthetic discovery results remain explicitly synthetic. Real-source failures are never replaced with demo data. New searches start with lenient price, volume, and day-change limits; saved search filters are preserved.
+
+Version **1.2.3** corrects freshness checks for candidate volume reconstructed from completed extended-hours minutes. Both the receipt time and latest included minute must be no more than two minutes old, checked again after historical metrics load. A stale fallback cannot pass a positive minimum-volume filter. With a zero minimum, the candidate remains visible, but stale day volume and unavailable day RVOL earn no ranking points. A current provider daily aggregate retains its five-minute receipt limit for discovery. The cumulative total still includes available premarket trading and does not reset at the open.
+
+Candidate discovery also refreshes stale, missing, or invalid quotes in its selected ranking pool after loading daily history, using the same market feed. Spreads still require a valid provider timestamp no more than 30 seconds old; receipt time never substitutes for it. Failed or unusable quote refreshes leave spreads unavailable with a coverage warning. The tables visibly label stale or partial volume, with the fallback's completed-minute time in its tooltip.
+
+Inside **Find candidates**, save your search source, universe, and filters, then optionally enable its weekday schedule. The default time is **9:15 a.m. New York time**, including daylight-saving changes; scheduling starts off. Nomisma searches once per weekday after that time and retains the last successful results across restarts. Opening it later catches up for the current weekday, without replaying missed days. Failed searches retry after 15 minutes, and a running research check delays the next attempt. The schedule uses weekdays rather than a holiday calendar, so market holidays can return no current-session candidates with a market-closed note. Keep Nomisma's local service and computer running for scheduled searches; keep the Windows app open when it owns that service. Searches leave monitor symbols and monitoring state unchanged until you explicitly apply a selection. This schedule is separate from the daily screener's after-close schedule.
+
+During regular trading, click **Find candidates** whenever you want a new search. There is no repeating intraday candidate search or automatic addition of symbols. **Refresh data** updates the active monitor's data; candidate results retain their saved search timestamp until another search completes.
 
 When the provider accepts optional trading-status and limit-price-band subscriptions, current-session events appear in the report. Confirmed halted or paused states suppress setup alerts. Missing status coverage means **unavailable**, not an assurance that trading is unrestricted.
 
-The monitor's editable defaults are a $0.50–$5 price range, at least 100,000 shares of completed regular-session volume, latest-minute relative volume of at least 1.5×, and a bid/ask spread no wider than 2%. Buy begins at 65/100 and Strong buy at 85/100, with two consecutive completed minute bars required before saving an alert and a 300-second repeat cooldown. These are research defaults, not a backtested strategy.
+The monitor's editable defaults are a $0.50–$5 price range, at least 100,000 shares of total day volume, latest-minute relative volume of at least 1.5×, and a bid/ask spread no wider than 2%. Buy begins at 65/100 and Strong buy at 85/100, with two consecutive completed minute bars required before saving an alert and a 300-second repeat cooldown. These are research defaults, not a backtested strategy.
 
 Open a stock to see its minute chart, score breakdown, freshness, reasons an alert is blocked, and the volume chart/table for the prior 30 trading sessions. **Print report** prints that stock's report, including its history and data provenance; the monitor's CSV export includes current metrics and timestamps.
 
 | Display | Meaning |
 | --- | --- |
-| Feed-day volume | The provider's daily aggregate, including available extended-hours activity. Its timestamp records when Nomisma received the aggregate, not the daily bar's start or the time of its latest constituent trade. |
+| Total day volume | The provider's daily aggregate, including available premarket and extended-hours trading. Receipt time and any partial minute-volume fallback are identified separately; the timestamp is not proof of the latest constituent trade's time. |
 | Session volume | Sum of completed regular-session minute volumes through the displayed minute-end timestamp. Trade sizes are not accumulated separately. |
 | 30-session total / average | Volume from exactly the previous 30 exchange-calendar trading sessions, excluding today. The average is the total divided by 30. |
 | Session relative volume | Completed regular-session volume divided by the prior 30-session full-day average. This is **not adjusted for time of day**. |
@@ -82,7 +104,7 @@ Open a stock to see its minute chart, score breakdown, freshness, reasons an ale
 
 The volume, baseline, and gap definitions are intentionally distinct. Provider daily aggregation can contain available extended-hours activity, whereas session volume and VWAP use regular-session minute bars. Feed coverage applies to every volume field. Missing data appears as unavailable, never as zero or a passing filter. See [the methodology](METHODOLOGY.md) for exact calculations and score weights.
 
-The monitor conservatively withholds regular-session volume, VWAP, daily relative volume, and float turnover if the exact opening minute or any minute before the latest completed bar is missing or malformed. A missing minute may mean no trades or missing data, especially on IEX; the app does not guess which. Feed-day volume can remain visible separately. Full prior-30-session history and 21 contiguous recent minutes are also required for alerts. Extended-hours prices may display, but setup alerts run only during the regular exchange session.
+The monitor conservatively withholds regular-session volume, VWAP, session relative volume, and float turnover if the exact opening minute or any minute before the latest completed bar is missing or malformed. A missing minute may mean no trades or missing data, especially on IEX; the app does not guess which. Total day volume and day RVOL can remain available separately when their own inputs are valid. Full prior-30-session history and 21 contiguous recent minutes are also required for alerts. Extended-hours prices may display, but setup alerts run only during the regular exchange session.
 
 ## Float data
 
@@ -92,7 +114,7 @@ You can enter **Float shares** and **Source date** in a real stock's report. A s
 
 ## Alerts and keeping the monitor running
 
-Prices can update with each trade, but the technical score uses the latest **completed minute close**. A Buy or Strong buy label is an eligible technical setup; saving an alert additionally requires your consecutive-bar confirmation count. Both setup levels require price above session VWAP, EMA9 above EMA20, sufficient minute RVOL and session volume, an acceptable spread and price, complete baselines, a trade and quote no older than 30 seconds, and completed-minute data no older than 120 seconds. Missing/stale data, a closed regular session, disabled alerts, or a disconnected monitor suppresses alerts.
+Prices can update with each trade, but the technical score uses the latest **completed minute close**. A Buy or Strong buy label is an eligible technical setup; saving an alert additionally requires your consecutive-bar confirmation count. Both setup levels require price above session VWAP, EMA9 above EMA20, sufficient minute RVOL and total day volume, an acceptable spread and price, complete baselines, a trade and quote no older than 30 seconds, and completed-minute data no older than 120 seconds. Missing/stale data, a closed regular session, disabled alerts, or a disconnected monitor suppresses alerts.
 
 Only a new completed minute bar advances alert confirmation. Quotes, trades, duplicates, historical reloading, and late corrections do not independently generate notifications. A confirmed Strong buy upgrade may alert during the Buy cooldown. Repeating a level requires a reset to Watch and expiration of the cooldown. Alert history and deduplication state persist locally, and **Mark read** acknowledges inbox alerts.
 
@@ -154,15 +176,25 @@ Use `--scan --source alpaca` for a one-off source override. The process exits no
 
 Scores combine trend (35 points), momentum (25), positive-day volume participation (20), relative strength versus SPY (15), and proximity to the prior 20-session high (5). Each stock shows its actual points and the conditions behind them. Missing or misaligned SPY data earns no relative-strength points and is explicitly flagged. See [the methodology](METHODOLOGY.md).
 
-The daily and intraday scores are separate hand-designed rankings. Neither is the probability that a stock will rise. Nomisma does not yet include historical strategy validation, calibrated forecasts, earnings/news analysis, a general fundamentals screen, transaction costs, position sizing, or order execution. Use the output as a research shortlist.
+The daily and intraday scores are separate hand-designed rankings. Neither is the probability that a stock will rise. Nomisma does not yet include historical strategy validation, calibrated forecasts, earnings/news analysis, a general fundamentals screen, calibrated execution costs or order execution. The separate built-in trade planner provides conditional research levels and hypothetical sizing using explicit cost and account assumptions. Use screening output as a research shortlist.
 
 ## Storage and testing
 
-Settings, presets, watchlists, imported data, scans, monitor configuration, manual float overrides, and setup alerts are stored in `data/nomisma.sqlite3`. Runtime data and backups are excluded from Git. Use `--data-dir /your/chosen/path` to keep a separate workspace. Scan history and the alert journal have pagination so older records remain accessible. Alert acknowledgment state is saved too.
+Settings, presets, watchlists, imported data, scans, monitor configuration, candidate-search settings and last successful results, manual float overrides, and setup alerts are stored in `data/nomisma.sqlite3`. Runtime data and backups are excluded from Git. Use `--data-dir /your/chosen/path` to keep a separate workspace. Scan history and the alert journal have pagination so older records remain accessible. Alert acknowledgment state is saved too.
 
 In **Settings**, download a consistent SQLite backup while the app is running. To restore, stop monitoring and wait for any scan, diagnostic, or discovery job to finish, choose the backup file, and click **Restore**. The app validates the file before changing data and saves the current workspace under `data/backups/before-restore-….sqlite3`. Only validated rows are copied into the app's own database schema. Restore replaces local research data and settings; the restored monitor remains stopped. Credentials are held separately in `.env` and are never included in these database backups. Uploaded backups are limited to 128 MB. Stop the app first if copying the database manually instead.
 
+### Built-in trade planner
+
+Choose **Model & sizing settings** in Live monitor to configure the intraday research model. New Buy/Strong buy alerts freeze a conditional entry band, protective stop, target range and holding-time rule. **Analyze trade plan** opens the saved result; **Analyze current data** makes a separate assessment using the active matching monitor. Original alert evidence and model results remain unchanged.
+
+Numeric share sizing additionally needs explicitly confirmed equity, available cash, remaining risk/exposure budgets, a complete positions list, cost assumptions and verified quote quantities. Account context expires after five minutes. Each plan uses those inputs independently; the app does not track broker positions or reserve cash across multiple plans. Missing inputs produce unavailable sizing, never guessed balances. The synthetic demo treats confirmed account values as clearly labeled hypothetical inputs.
+
+The model uses minute ATR rather than the displayed daily ATR. Its defaults are **unvalidated research assumptions**, including the price increment and execution costs. It can return no-trade or waiting conditions; its holding limit is not a prediction of the best sell time. It never submits orders. Read the [model equations, input contract and validation limits](TRADE_PLANNER.md).
+
 ### Alert evidence and observed outcomes
+
+The main **Setup alerts** panel follows the monitor's configured source. Selecting Alpaca shows only Alpaca alerts; selecting the synthetic lab shows only demo alerts. Its unread count and **Mark all read** action use the same source. Switching sources does not delete or acknowledge the other source's records. The **Research journal** keeps saved alerts from both sources, with their source labels and original evidence.
 
 New alerts preserve their configuration, data quality, indicator values, session metadata, and minute chart as they appeared at the setup. Open a saved alert to inspect that evidence even if its symbol is no longer monitored. Alerts created before this feature remain available, with missing original evidence explicitly identified.
 
@@ -179,3 +211,5 @@ python3 -B -m unittest discover -s tests -v
 The suite exercises independently checked indicators, intraday volume and calendar boundaries, freshness and missing-data guards, alert confirmation/deduplication, WebSocket framing/authentication, provider pagination, daily filters, CSV validation, persistence, scheduling, and HTTP input/origin protections. Provider tests use mocked responses, so they do not require credentials or verify your account's actual entitlement. The server is designed for local personal use; deploying it publicly would require a production server and authentication.
 
 For a browser workflow check with an installed Chrome/Chromium, run `python3 -B tools/browser_check.py` from this project directory. It uses an isolated temporary database and browser profile, exercises real dashboard controls, and saves desktop/mobile screenshots under the root `artifacts/nomisma/` directory. Use `--chrome /path/to/chrome` on systems where the browser is not discovered automatically.
+
+Version **1.2.4** restricts real candidate searches, daily Alpaca/CSV screening, and live radar selections to verified company common/ordinary stocks and depositary shares. ETFs, funds, derivatives, preferred shares and unverified instruments are excluded using Nasdaq Trader symbol directories. Internet access is required to refresh this hourly classification cache. SPY is retained only as the market benchmark.

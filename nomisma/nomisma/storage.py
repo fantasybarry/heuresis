@@ -145,14 +145,24 @@ class Store:
             db.execute("INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (
                 "monitor_alert_tracker", json.dumps(tracker, allow_nan=False)))
 
-    def monitor_alerts(self, limit=100, offset=0, include_evidence=False):
+    def monitor_alerts(self, limit=100, offset=0, include_evidence=False, source=None):
         limit, offset = self._page(limit, offset)
+        if source is not None and source not in ("demo", "alpaca"):
+            raise ValueError("Alert source must be demo or alpaca.")
+        query = "SELECT alerts.payload,alerts.acknowledged FROM monitor_alerts AS alerts"
+        params = []
+        if source is not None:
+            # Scope before pagination: newer demo records must never crowd
+            # real alerts out of the configured source's inbox.
+            query += " JOIN monitor_alert_index AS metadata ON metadata.id=alerts.id WHERE metadata.source=?"
+            params.append(source)
+        query += " ORDER BY alerts.created_at DESC,alerts.id DESC LIMIT ? OFFSET ?"
         with self.connect() as db:
-            rows = db.execute("SELECT payload,acknowledged FROM monitor_alerts ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+            rows = db.execute(query, params + [limit, offset]).fetchall()
         result = [dict(json.loads(row["payload"]), acknowledged=bool(row["acknowledged"])) for row in rows]
         if not include_evidence:
             for alert in result:
-                for field in ("snapshot", "config", "session"):
+                for field in ("snapshot", "config", "session", "trade_plan"):
                     alert.pop(field, None)
         return result
 
@@ -206,7 +216,10 @@ class Store:
         """Read only known table data; never execute schema from an upload."""
         from .engine import screen, validate_filters
         from .monitor_metrics import validate_monitor_config
-        from .server import validate_settings
+        from .server import validate_settings, validate_discovery_settings, default_discovery_state
+        from .research import validate_discovery
+        from .trade_plan import validate_plan_settings
+        from .planner import evaluate_plan
 
         expected = {
             "state": ["key", "value"], "scans": ["id", "created_at", "payload"],
@@ -245,12 +258,95 @@ class Store:
             if parsed.tzinfo is None:
                 raise ValueError("Backup timestamps need a time zone.")
 
+        def discovery_job(value, successful=False):
+            if not isinstance(value, dict) or value.get("kind") != "discovery" or type(value.get("running")) is not bool:
+                raise ValueError("Invalid saved discovery job.")
+            if not isinstance(value.get("id"), str) or not 1 <= len(value["id"]) <= 128:
+                raise ValueError("Invalid discovery job id.")
+            if not isinstance(value.get("message"), str) or len(value["message"]) > 4096:
+                raise ValueError("Invalid discovery status message.")
+            if value.get("error") is not None and (not isinstance(value["error"], str) or len(value["error"]) > 4096):
+                raise ValueError("Invalid discovery error message.")
+            stamp(value.get("started_at"))
+            if value.get("completed_at") is not None:
+                stamp(value["completed_at"])
+            if value.get("scheduled_date") is not None:
+                datetime.strptime(value["scheduled_date"], "%Y-%m-%d")
+            if not successful:
+                if value.get("result") is not None:
+                    raise ValueError("Discovery status must not contain a duplicate result.")
+                return
+            result = value.get("result")
+            if value["running"] or value.get("error") is not None or not value.get("completed_at") or not isinstance(result, dict):
+                raise ValueError("Invalid completed discovery result.")
+            filters = validate_discovery(result.get("filters"))
+            if result.get("source") != filters["source"] or result.get("feed") not in ("synthetic", "iex", "sip"):
+                raise ValueError("Invalid saved discovery provenance.")
+            for field in ("as_of", "completed_at", "market_as_of"):
+                stamp(result.get(field))
+            for field in ("session_date", "latest_session_date"):
+                datetime.strptime(result.get(field, ""), "%Y-%m-%d")
+            rows, coverage, warnings = result.get("rows"), result.get("coverage"), result.get("warnings")
+            if not isinstance(rows, list) or len(rows) > filters["limit"]:
+                raise ValueError("Invalid saved discovery candidates.")
+            if not isinstance(coverage, dict) or any(type(value) is not int or value < 0 for value in coverage.values()):
+                raise ValueError("Invalid discovery coverage.")
+            if coverage.get("returned") != len(rows):
+                raise ValueError("Discovery coverage does not match its candidates.")
+            if not isinstance(warnings, list) or any(not isinstance(value, str) for value in warnings):
+                raise ValueError("Invalid discovery warnings.")
+            for item in rows:
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid saved discovery candidate.")
+                validate_discovery({"symbols": [item.get("symbol")]})
+                if not isinstance(item.get("name"), str) or item.get("freshness") not in ("fresh", "stale"):
+                    raise ValueError("Invalid candidate name or freshness.")
+                for field in ("price", "change_pct", "age_seconds"):
+                    if type(item.get(field)) not in (int, float):
+                        raise ValueError("Invalid candidate price or volume.")
+                if item["price"] <= 0 or item["age_seconds"] < 0:
+                    raise ValueError("Invalid candidate price or volume.")
+                volume = item.get("day_volume")
+                if volume is None:
+                    if (filters["min_day_volume"] != 0 or item.get("volume_basis") != "unavailable"
+                            or item.get("day_volume_fresh") is not False or item.get("volume_at") is not None):
+                        raise ValueError("Unavailable candidate volume needs explicit provenance and a zero volume filter.")
+                else:
+                    if type(volume) not in (int, float) or volume < 0 or int(volume) != volume:
+                        raise ValueError("Invalid candidate volume.")
+                    stamp(item.get("volume_at"))
+                stamp(item.get("trade_at"))
+                for field in ("avg_volume_3m", "avg_daily_volume", "day_relative_volume", "spread", "spread_pct", "beta", "atr", "atr_pct", "liquidity_volatility_score"):
+                    value = item.get(field)
+                    if value is not None and (type(value) not in (int, float) or (field != "beta" and value < 0)):
+                        raise ValueError("Invalid candidate screening metric.")
+                for field in ("quote_at", "minute_at", "volume_received_at"):
+                    if item.get(field) is not None:
+                        stamp(item[field])
+
         for row in db.execute("SELECT key,value FROM state"):
             value = decode(row["value"])
             if row["key"] == "settings":
                 validate_settings(value)
+            elif row["key"] == "discovery_settings":
+                validate_discovery_settings(value)
+            elif row["key"] == "discovery_state":
+                # last_success_at is optional: backups made before repeating searches lack it.
+                if not isinstance(value, dict) or set(value) - {"last_success_at"} != set(default_discovery_state()):
+                    raise ValueError("Invalid saved discovery state.")
+                if value["last_success_date"] is not None:
+                    datetime.strptime(value["last_success_date"], "%Y-%m-%d")
+                for field in ("retry_after", "last_success_at"):
+                    if value.get(field) is not None:
+                        stamp(value[field])
+                if value["last_run"] is not None:
+                    discovery_job(value["last_run"])
+                if value["latest"] is not None:
+                    discovery_job(value["latest"], successful=True)
             elif row["key"] == "monitor_config":
                 validate_monitor_config(value)
+            elif row["key"] == "planning_settings":
+                validate_plan_settings(value)
             elif row["key"] == "csv_dataset":
                 if not isinstance(value, dict) or value.get("source") != "csv":
                     raise ValueError("Invalid imported CSV dataset.")
@@ -354,6 +450,15 @@ class Store:
                     for field in ("target_at", "observed_at"):
                         if item.get(field) is not None:
                             stamp(item[field])
+            if "trade_plan" in alert:
+                plan = alert["trade_plan"]
+                if (not isinstance(plan, dict) or plan.get("schema_version") != 1
+                        or plan.get("kind") != "original_alert" or plan.get("alert_id") != alert["id"]
+                        or not isinstance(plan.get("analysis_id"), str)):
+                    raise ValueError("Invalid saved model analysis.")
+                settings = validate_plan_settings(plan.get("settings"))
+                if plan.get("result") != evaluate_plan(alert, settings):
+                    raise ValueError("Saved model analysis does not match its original evidence and assumptions.")
         return expected
 
     def restore_backup(self, content):
@@ -395,12 +500,16 @@ class Store:
                 raise ValueError("The file is not a valid Nomisma backup.") from exc
         return {"backup_path": str(safety)}
 
-    def acknowledge_monitor_alerts(self, identifier=None, all_alerts=False):
+    def acknowledge_monitor_alerts(self, identifier=None, all_alerts=False, source=None):
+        if source is not None and source not in ("demo", "alpaca"):
+            raise ValueError("Alert source must be demo or alpaca.")
+        query = "UPDATE monitor_alerts SET acknowledged=1 WHERE " + ("acknowledged=0" if all_alerts else "id=?")
+        params = [] if all_alerts else [identifier]
+        if source is not None:
+            query += " AND id IN (SELECT id FROM monitor_alert_index WHERE source=?)"
+            params.append(source)
         with self.connect() as db:
-            if all_alerts:
-                db.execute("UPDATE monitor_alerts SET acknowledged=1 WHERE acknowledged=0")
-            else:
-                updated = db.execute("UPDATE monitor_alerts SET acknowledged=1 WHERE id=?", (identifier,))
-                if updated.rowcount == 0:
-                    raise ValueError("Alert not found.")
-        return self.monitor_alerts()
+            updated = db.execute(query, params)
+            if not all_alerts and updated.rowcount == 0:
+                raise ValueError("Alert not found.")
+        return self.monitor_alerts(source=source)

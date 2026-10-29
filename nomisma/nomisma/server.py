@@ -18,9 +18,14 @@ from zoneinfo import ZoneInfo
 from .engine import DEFAULT_FILTERS, PRESETS, screen, validate_filters
 from .providers import demo_dataset, fetch_alpaca, parse_csv, provider_status
 from .storage import Store
+from .live_data import fetch_candles
 from .monitor import LiveMonitor, MonitorBusy, monitor_csv
+from .monitor_metrics import MAX_MONITOR_SYMBOLS
+from .research import default_discovery, validate_discovery
 
 LOGGER = logging.getLogger("nomisma")
+# After the day's first scheduled search, discovery repeats on this interval until the 4 p.m. close.
+DISCOVERY_REPEAT = timedelta(minutes=30)
 STATIC = Path(__file__).parent / "static"
 MAX_BODY = 25 * 1024 * 1024
 MAX_BACKUP = 128 * 1024 * 1024
@@ -69,6 +74,37 @@ def validate_settings(payload, current=None):
     return value
 
 
+def default_discovery_settings():
+    return {"config": default_discovery(),
+            "schedule": {"enabled": False, "time": "09:15", "timezone": "America/New_York"}}
+
+
+def validate_discovery_settings(payload, current=None):
+    if not isinstance(payload, dict) or set(payload) - {"config", "schedule"}:
+        raise ValueError("Supply discovery config and a weekday schedule.")
+    result = copy.deepcopy(current or default_discovery_settings())
+    if "config" in payload:
+        if not isinstance(payload["config"], dict):
+            raise ValueError("Discovery config must be a JSON object.")
+        result["config"] = validate_discovery(dict(result["config"], **payload["config"]))
+    else:
+        result["config"] = validate_discovery(result["config"])
+    if "schedule" in payload:
+        if not isinstance(payload["schedule"], dict):
+            raise ValueError("Discovery schedule must be a JSON object.")
+        result["schedule"].update(payload["schedule"])
+    # Both schedulers use the same Eastern wall-clock validation. Their saved
+    # configuration, execution state, and successful dates stay independent.
+    result["schedule"] = validate_settings({"schedule": result["schedule"]})["schedule"]
+    if result["config"]["source"] == "demo" and result["config"]["universe"] == "all":
+        raise ValueError("All-listings discovery requires Alpaca. Choose starter or custom symbols for demo.")
+    return result
+
+
+def default_discovery_state():
+    return {"last_run": None, "latest": None, "last_success_date": None, "retry_after": None}
+
+
 class BusyError(Exception):
     pass
 
@@ -79,16 +115,103 @@ class Application:
         self.lock = threading.Lock()
         self.mutation_lock = threading.RLock()
         self.research_jobs = {}
+        self.radar_date, self.radar_paused = None, False
         self.stop_event = threading.Event()
         self.job = {"running": False, "message": "Ready to scan", "error": None, "scan_id": None}
         if self.store.get("settings") is None:
             self.store.set("settings", default_settings())
+        if self.store.get("discovery_settings") is None:
+            self.store.set("discovery_settings", default_discovery_settings())
+        self._recover_discovery()
         if seed and self.store.scan() is None:
             self.store.save_scan(screen(demo_dataset(), DEFAULT_FILTERS))
         self.monitor = LiveMonitor(self.store)
+        from .planner import Planner
+        self.planner = Planner(self.store, self.monitor)
 
     def settings(self):
         return self.store.get("settings", default_settings())
+
+    def _recover_discovery(self):
+        state = self.store.get("discovery_state", default_discovery_state())
+        previous = state.get("last_run")
+        if previous and previous.get("running"):
+            previous.update(running=False, message="Previous discovery was interrupted",
+                            error="Nomisma closed before this search finished. The enabled schedule will retry when due.",
+                            completed_at=datetime.now(timezone.utc).isoformat())
+            state["retry_after"] = None
+            self.store.set("discovery_state", state)
+
+    def discovery_settings(self):
+        return self.store.get("discovery_settings", default_discovery_settings())
+
+    def save_discovery_settings(self, payload):
+        with self.mutation_lock, self.lock:
+            settings = validate_discovery_settings(payload, self.discovery_settings())
+            if settings["schedule"]["enabled"] and settings["config"]["source"] == "alpaca":
+                self.check_source({"source": "alpaca"})
+            self.store.set("discovery_settings", settings)
+        return self.discovery_snapshot()
+
+    def _discovery_next_due(self, settings, state, now):
+        schedule = settings["schedule"]
+        if not schedule["enabled"]:
+            return None
+        zone = ZoneInfo(schedule["timezone"])
+        local = now.astimezone(zone)
+        retry = datetime.fromisoformat(state["retry_after"]) if state.get("retry_after") else now
+        hour, minute = map(int, schedule["time"].split(":"))
+        for offset in range(9):
+            day = local.date() + timedelta(days=offset)
+            if day.weekday() >= 5:
+                continue
+            scheduled = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone)
+            if day.isoformat() == state.get("last_success_date"):
+                last = state.get("last_success_at")
+                scheduled = datetime.fromisoformat(last) + DISCOVERY_REPEAT if last else None
+                if scheduled is None or scheduled.astimezone(zone) >= datetime(day.year, day.month, day.day, 16, tzinfo=zone):
+                    continue
+            candidate = max(scheduled, now, retry)
+            if candidate.astimezone(zone).date() == day:
+                return candidate.isoformat()
+        return None
+
+    def discovery_snapshot(self, now=None):
+        now = now or datetime.now(timezone.utc)
+        with self.lock:
+            settings = self.discovery_settings()
+            state = self.store.get("discovery_state", default_discovery_state())
+            running = next((copy.deepcopy(job) for job in self.research_jobs.values()
+                            if job["running"] and job["kind"] == "discovery"), None)
+            busy = any(job["running"] for job in self.research_jobs.values())
+        next_due = None if running else self._discovery_next_due(settings, state, now)
+        enabled = settings["schedule"]["enabled"]
+        message = "Weekday schedule is off"
+        if running:
+            message = running["message"]
+        elif enabled:
+            if busy and next_due and datetime.fromisoformat(next_due) <= now:
+                message = "Waiting for the current research check to finish"
+            elif state.get("retry_after") and datetime.fromisoformat(state["retry_after"]) > now:
+                message = "Discovery failed; retry scheduled"
+            else:
+                message = "Weekday schedule is enabled"
+        last_run = copy.deepcopy(state.get("last_run"))
+        if last_run:
+            last_run.pop("result", None)
+        status = {"enabled": enabled, "running": running is not None,
+                  "last_run": last_run, "last_success_date": state.get("last_success_date"),
+                  "next_due": next_due, "retry_after": state.get("retry_after"), "message": message}
+        return dict(settings, status=status, latest=state.get("latest"), job=running or state.get("last_run"))
+
+    def discovery_due(self, now=None):
+        now = now or datetime.now(timezone.utc)
+        settings = self.discovery_settings()
+        state = self.store.get("discovery_state", default_discovery_state())
+        next_due = self._discovery_next_due(settings, state, now)
+        if next_due and datetime.fromisoformat(next_due) <= now:
+            return now.astimezone(ZoneInfo(settings["schedule"]["timezone"])).date().isoformat()
+        return None
 
     def presets(self):
         return list(PRESETS) + self.store.presets()
@@ -130,6 +253,10 @@ class Application:
             dataset = fetch_alpaca(settings["universe"], settings["symbols"], progress=self.progress)
         elif settings["source"] == "csv":
             dataset = self.store.get("csv_dataset")
+            from .instruments import stock_symbols
+            allowed = stock_symbols()
+            dataset = dict(dataset, assets=[asset for asset in dataset["assets"] if asset["symbol"] in allowed],
+                           warnings=list(dataset.get("warnings", [])) + ["Stocks only: imported non-stock and unverified symbols are excluded."])
         else:
             dataset = demo_dataset()
         # Custom selections also apply to imported and illustrative datasets.
@@ -158,44 +285,117 @@ class Application:
         worker.start()
         return job
 
-    def start_research(self, kind, payload):
+    def start_research(self, kind, payload, scheduled_date=None):
+        with self.mutation_lock:
+            return self._start_research(kind, payload, scheduled_date)
+
+    def _start_research(self, kind, payload, scheduled_date=None):
         if kind not in ("diagnostics", "discovery"):
             raise ValueError("Unknown research action.")
+        settings = None
+        if kind == "discovery":
+            settings = validate_discovery_settings({"config": payload}, self.discovery_settings())
+            payload = settings["config"]
         with self.lock:
             if any(job["running"] for job in self.research_jobs.values()):
                 raise BusyError("A market-data check or discovery search is already running.")
             identifier = uuid.uuid4().hex
             job = {"id": identifier, "kind": kind, "running": True,
                    "message": "Checking market data…" if kind == "diagnostics" else "Finding session candidates…",
-                   "error": None, "result": None}
+                   "error": None, "result": None, "started_at": datetime.now(timezone.utc).isoformat(),
+                   "completed_at": None, "scheduled_date": scheduled_date}
+            if settings is not None:
+                self.store.set("discovery_settings", settings)
+                state = self.store.get("discovery_state", default_discovery_state())
+                state["last_run"] = copy.deepcopy(job)
+                self.store.set("discovery_state", state)
             self.research_jobs[identifier] = job
             while len(self.research_jobs) > 32:
                 del self.research_jobs[next(iter(self.research_jobs))]
             initial = copy.deepcopy(job)
+        worker = threading.Thread(target=self._research_worker, args=(job, copy.deepcopy(payload)),
+                                  name="nomisma-" + kind, daemon=True)
+        try:
+            worker.start()
+        except Exception:
+            self._finish_research(job, error="The research worker could not start. Try again.")
+            raise
+        return initial
 
+    def _finish_research(self, job, result=None, error=None):
+        with self.lock:
+            completed = dict(job, running=False, completed_at=datetime.now(timezone.utc).isoformat(),
+                             message="Needs attention" if error else (
+                                 "Check complete" if job["kind"] == "diagnostics" else "Discovery complete"),
+                             result=result, error=error)
+            try:
+                if job["kind"] == "discovery":
+                    state = self.store.get("discovery_state", default_discovery_state())
+                    state["last_run"] = dict(completed, result=None)
+                    if error is None:
+                        state["latest"] = completed
+                    if job.get("scheduled_date"):
+                        if error is None:
+                            state["last_success_date"] = job["scheduled_date"]
+                            state["last_success_at"] = completed["completed_at"]
+                            state["retry_after"] = None
+                        else:
+                            state["retry_after"] = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+                    # A single transaction commits the result and deduplication
+                    # date together, before advertising that the worker is idle.
+                    self.store.set("discovery_state", state)
+            except Exception as exc:
+                completed.update(message="Needs attention", error="Discovery finished but could not save its result. Check available disk space and retry.")
+                LOGGER.warning("Could not save research state (%s)", type(exc).__name__)
+            job.update(completed)
+        if job["kind"] == "discovery" and error is None and result:
+            self._update_radar(result)
+
+    def _update_radar(self, result):
+        """Replace the radar's symbols with the search's top results; an active monitor restarts on them."""
+        symbols = [row["symbol"] for row in result.get("rows", [])][:MAX_MONITOR_SYMBOLS]
+        day = result.get("session_date")
+        if not symbols:
+            # An empty search keeps today's radar, not an earlier session's: pause until a search finds today's stocks.
+            if day != self.radar_date and self.monitor.status["running"]:
+                self.monitor.stop()
+                with self.monitor.lock:
+                    self.monitor.status["message"] = "Paused: no stock meets today's search yet. Monitoring resumes after the next search finds stocks."
+                self.radar_paused = True
+            return
+        self.radar_date = day
+        resume, self.radar_paused = self.radar_paused, False
+        config = self.monitor.config
+        if not resume and result.get("source") == config["source"] and set(symbols) == set(config["symbols"]):
+            return
+        change = {"source": result["source"], "symbols": symbols}
+        try:
+            if self.monitor.status["running"] or resume:
+                self.monitor.stop()
+                self.monitor.start(change)
+            else:
+                self.monitor.save_config(change)
+        except Exception as exc:
+            LOGGER.warning("Could not update the radar from discovery (%s)", type(exc).__name__)
+
+    def _research_worker(self, job, payload):
         def progress(message):
             with self.lock:
                 job["message"] = str(message)
 
-        def work():
-            try:
-                from .research import diagnose, discover
-                if kind == "diagnostics":
-                    snapshot = self.monitor.snapshot()
-                    result = diagnose(snapshot["config"], snapshot, progress=progress, stop_event=self.stop_event,
-                                      snapshot_provider=self.monitor.snapshot)
-                else:
-                    result = discover(copy.deepcopy(payload), progress=progress, stop_event=self.stop_event)
-                with self.lock:
-                    job.update(running=False, message="Check complete" if kind == "diagnostics" else "Discovery complete", result=result)
-            except Exception as exc:
-                message = str(exc) if isinstance(exc, ValueError) else "The research action could not finish. Check your connection and try again."
-                with self.lock:
-                    job.update(running=False, message="Needs attention", error=message)
-                LOGGER.warning("Research action failed (%s)", type(exc).__name__)
-
-        threading.Thread(target=work, name="nomisma-" + kind, daemon=True).start()
-        return initial
+        try:
+            from .research import diagnose, discover
+            if job["kind"] == "diagnostics":
+                snapshot = self.monitor.snapshot()
+                result = diagnose(snapshot["config"], snapshot, progress=progress, stop_event=self.stop_event,
+                                  snapshot_provider=self.monitor.snapshot)
+            else:
+                result = discover(payload, progress=progress, stop_event=self.stop_event)
+            self._finish_research(job, result=result)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, ValueError) else "The research action could not finish. Check your connection and try again."
+            self._finish_research(job, error=message)
+            LOGGER.warning("Research action failed (%s)", type(exc).__name__)
 
     def research_status(self, identifier):
         with self.lock:
@@ -208,8 +408,11 @@ class Application:
             result = self.store.restore_backup(content)
             self.monitor.close()
             self.monitor = LiveMonitor(self.store)
+            from .planner import Planner
+            self.planner = Planner(self.store, self.monitor)
             self.job = {"running": False, "message": "Workspace restored", "error": None, "scan_id": None}
             self.research_jobs = {}
+            self._recover_discovery()
             return dict(result, restored=True)
 
     def _worker(self, settings, scheduled_date):
@@ -261,6 +464,15 @@ class Application:
                 self.store.set("schedule_retry_after", (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat())
                 with self.lock:
                     self.job.update(message="Scheduled scan needs attention", error=str(exc))
+
+        discovery_date = self.discovery_due(now)
+        if discovery_date:
+            try:
+                self.start_research("discovery", self.discovery_settings()["config"], scheduled_date=discovery_date)
+            except BusyError:
+                # Retain the due date; the next tick retries after other
+                # diagnostics or a manual discovery search has finished.
+                pass
 
     def start_scheduler(self):
         def loop():
@@ -368,12 +580,37 @@ def make_handler(app):
                     filename = "nomisma-backup-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".sqlite3"
                     self._headers(200, "application/vnd.sqlite3", len(data), {"Content-Disposition": 'attachment; filename="' + filename + '"'})
                     return self.wfile.write(data)
+                if path == "/api/planner/settings":
+                    return self._json({"settings": app.planner.settings()})
+                if path.startswith("/api/planner/alerts/"):
+                    result = app.planner.alert_plan(path.removeprefix("/api/planner/alerts/"))
+                    return self._json(result or {"error": "Alert not found."}, 200 if result else 404)
                 if path == "/api/bootstrap":
                     return self._json(app.bootstrap())
+                if path == "/api/discovery/settings":
+                    return self._json(app.discovery_snapshot())
+                if path == "/api/discovery/latest":
+                    snapshot = app.discovery_snapshot()
+                    return self._json({"job": snapshot["job"] if snapshot["status"]["running"] else snapshot["latest"],
+                                       "status": snapshot["status"]})
                 if path == "/api/monitor":
-                    return self._json(app.monitor.snapshot())
+                    compact = parse_qs(parsed.query).get("compact", [None])[0] == "1"
+                    return self._json(app.monitor.snapshot(compact=True) if compact else app.monitor.snapshot())
+                if path.startswith("/api/monitor/symbol/"):
+                    symbol = path.removeprefix("/api/monitor/symbol/").upper()
+                    if not SYMBOL.fullmatch(symbol):
+                        raise ValueError("Use a valid ticker symbol.")
+                    row = app.monitor.row_detail(symbol)
+                    return self._json({"row": row} if row is not None else {"error": "Monitor symbol not found."},
+                                      200 if row is not None else 404)
+                if path.startswith("/api/monitor/candles/"):
+                    symbol = path.removeprefix("/api/monitor/candles/").upper()
+                    if not SYMBOL.fullmatch(symbol):
+                        raise ValueError("Use a valid ticker symbol.")
+                    query = parse_qs(parsed.query)
+                    return self._json(fetch_candles(symbol, query.get("timeframe", ["5Min"])[0], query.get("before", [None])[0]))
                 if path == "/api/monitor/events":
-                    return self._monitor_events()
+                    return self._monitor_events(compact=parse_qs(parsed.query).get("compact", [None])[0] == "1")
                 if path == "/api/monitor/export.csv":
                     data = monitor_csv(app.monitor.snapshot())
                     self._headers(200, "text/csv; charset=utf-8", len(data), {"Content-Disposition": 'attachment; filename="nomisma-intraday-monitor.csv"'})
@@ -394,7 +631,7 @@ def make_handler(app):
                 if path.startswith("/api/"):
                     return self._json({"error": "Endpoint not found."}, 404)
                 # Explicit allowlist prevents serving the database, .env, or Python source.
-                file = {"/": "index.html", "/index.html": "index.html", "/styles.css": "styles.css", "/app.js": "app.js", "/live.js": "live.js", "/live.css": "live.css", "/favicon.svg": "favicon.svg"}.get(path)
+                file = {"/": "index.html", "/index.html": "index.html", "/styles.css": "styles.css", "/app.js": "app.js", "/live.js": "live.js", "/live.css": "live.css", "/planner.js": "planner.js", "/planner.css": "planner.css", "/favicon.svg": "favicon.svg"}.get(path)
                 if not file or not (STATIC / file).is_file():
                     return self._json({"error": "Page not found."}, 404)
                 data = (STATIC / file).read_bytes()
@@ -409,7 +646,7 @@ def make_handler(app):
                 LOGGER.warning("Request failed (%s)", type(exc).__name__)
                 self._json({"error": "The request could not be completed."}, 500)
 
-        def _monitor_events(self):
+        def _monitor_events(self, compact=False):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-store")
@@ -420,7 +657,8 @@ def make_handler(app):
             heartbeat = 0
             try:
                 while not app.stop_event.is_set():
-                    payload = json.dumps(app.monitor.snapshot(), allow_nan=False, separators=(",", ":"))
+                    snapshot = app.monitor.snapshot(compact=True) if compact else app.monitor.snapshot()
+                    payload = json.dumps(snapshot, allow_nan=False, separators=(",", ":"))
                     if payload != last:
                         self.wfile.write(("event: monitor\ndata: " + payload + "\n\n").encode())
                         self.wfile.flush()
@@ -466,8 +704,14 @@ def make_handler(app):
                     raise ValueError("Send a JSON object.")
                 if path == "/api/diagnostics":
                     return self._json({"job": app.start_research("diagnostics", payload)}, 202)
+                if path == "/api/planner/settings":
+                    return self._json(app.planner.save_settings(payload))
+                if path == "/api/planner/analyze":
+                    return self._json(app.planner.analyze(payload))
                 if path == "/api/discovery":
                     return self._json({"job": app.start_research("discovery", payload)}, 202)
+                if path == "/api/discovery/settings":
+                    return self._json(app.save_discovery_settings(payload))
                 if path == "/api/monitor/config":
                     return self._json({"config": app.monitor.save_config(payload)})
                 if path == "/api/monitor/start":
@@ -477,12 +721,20 @@ def make_handler(app):
                     return self._json(app.monitor.start(payload), 202)
                 if path == "/api/monitor/stop":
                     return self._json(app.monitor.stop())
+                if path == "/api/monitor/refresh":
+                    with app.lock:
+                        if any(job["running"] and job["kind"] == "diagnostics" for job in app.research_jobs.values()):
+                            raise BusyError("Wait for the connection diagnostic to finish before updating the monitor.")
+                    return self._json(app.monitor.refresh(), 202)
                 if path == "/api/monitor/float":
                     return self._json({"float": app.monitor.set_float(payload)})
                 if path == "/api/monitor/alerts/ack":
                     if payload.get("all") is not True and not isinstance(payload.get("id"), str):
                         raise ValueError("Supply an alert id or all: true.")
-                    return self._json({"alerts": app.store.acknowledge_monitor_alerts(payload.get("id"), payload.get("all") is True)})
+                    if "source" in payload and payload["source"] not in ("demo", "alpaca"):
+                        raise ValueError("Alert source must be demo or alpaca.")
+                    return self._json({"alerts": app.store.acknowledge_monitor_alerts(
+                        payload.get("id"), payload.get("all") is True, source=payload.get("source"))})
                 if path == "/api/scan":
                     return self._json({"job": app.start_scan(payload)}, 202)
                 if path == "/api/settings":

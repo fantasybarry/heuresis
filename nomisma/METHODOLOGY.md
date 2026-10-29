@@ -1,12 +1,12 @@
 # Monitoring and screening methodology
 
-Nomisma focuses on intraday penny-stock momentum while retaining its separate daily screener. Both 0–100 scores compare observed technical conditions. Neither is a return forecast, success probability, or backtested strategy. The point allocations are application design choices.
+Nomisma focuses on intraday penny-stock momentum while retaining its separate daily screener. Its liquidity/volatility ranking, intraday technical setup score, and daily screener score each use a 0–100 scale for a different comparison. They are not return forecasts, success probabilities, or backtested strategies. The point allocations are application design choices.
 
 ## Intraday session and price timing
 
-Live monitoring follows at most 20 requested symbols on Alpaca's IEX or entitled real-time SIP feed. It loads REST history and snapshots, then subscribes to trades, quotes, minute bars, revised minute bars, and daily aggregates over a real WebSocket. The browser receives local SSE updates at approximately one-second intervals, with two-second polling as a fallback; browser refresh intervals do not change the upstream feed.
+Live monitoring follows at most 50 requested symbols on Alpaca's IEX or entitled real-time SIP feed, subject to the account's subscription limit. It loads REST history and snapshots, then subscribes to trades, quotes, minute bars, revised minute bars, and daily aggregates over a real WebSocket. The browser receives local SSE updates at approximately one-second intervals, with two-second polling as a fallback; browser refresh intervals do not change the upstream feed.
 
-The exchange calendar provides the current or most recent trading session, regular open/close, and exactly the prior 30 trading dates. It honors holidays and shortened sessions. Minute timestamps identify the **start** of a bar. A bar becomes usable only after its start plus one minute is no later than the evaluation clock or session close. Bars outside regular hours, from another session, or from the future are excluded. Repeated timestamps replace observations rather than adding their volumes, and ordering is normalized. Prices and volume are not synthesized to fill missing real-market bars.
+The exchange calendar provides the current or most recent trading session, regular open/close, and exactly the prior 30 trading dates used by the technical alert baseline. Longer daily history supports the separate liquidity/volatility metrics. The calendar honors holidays and shortened sessions. Minute timestamps identify the **start** of a bar. A bar becomes usable only after its start plus one minute is no later than the evaluation clock or session close. Bars outside regular hours, from another session, or from the future are excluded from regular-session technical calculations. Repeated timestamps replace observations rather than adding their volumes, and ordering is normalized. Prices and volume are not synthesized to fill missing real-market bars.
 
 The displayed price is the latest valid trade with its own timestamp. If unavailable, the last completed minute close can be displayed, but that fallback does not satisfy the fresh-trade alert gate. The technical score always uses completed minute closes: an individual trade can change the displayed price and day change without changing the score. Quotes have an independent timestamp and require positive bid and ask prices with ask at least bid. Spread is `100 × (ask − bid) / ((ask + bid) / 2)`.
 
@@ -16,7 +16,7 @@ Outside regular hours, prices or quotes may continue to display; alerts remain d
 
 | Metric | Exact calculation and coverage |
 | --- | --- |
-| Feed-day volume (`day_volume`) | Raw provider `dailyBar.v`, accepted only for a valid nonfuture bar timestamp belonging to the displayed session date in America/New_York. It may include available extended-hours activity. |
+| Total day volume (`day_volume`) | Provider `dailyBar.v` for the displayed New York session date, including eligible premarket and extended-hours trades. When that aggregate is unavailable, completed minute volume from 04:00 New York onward may be shown with an explicit fallback basis; it is never added to an existing daily aggregate. |
 | Feed-day receipt time (`day_volume_at`) | Server receipt time of a daily-stream update, or the snapshot response receipt time. It is not the bar's start, a trade timestamp, or proof that every constituent trade is current. |
 | Regular-session volume (`session_volume`) | Sum of all valid completed regular-session minute volumes from the exact opening minute through the latest completed minute. `volume_at` is that latest minute's end. Raw trade sizes are never summed into this measure. |
 | Prior 30-session total (`volume_30d_total`) | Sum of daily volumes on exactly the previous 30 exchange-calendar trading dates, excluding the displayed session. Daily data is split adjusted and retains the provider's daily coverage, which can differ from regular-hours-only volume. |
@@ -28,15 +28,60 @@ Outside regular hours, prices or quotes may continue to display; alerts remain d
 | Day change (`change_pct`) | `100 × (latest displayed price / the same split-adjusted previous-session.close − 1)`. This changes intraday while the opening gap stays fixed. |
 | Float turnover (`float_turnover`) | `session_volume / float_shares`, expressed as a ratio. Source and source date remain visible beside the float count. |
 
+Total day volume continues through the opening bell; the regular-session counter starts at the regular open. The two are different measures. Alpaca's daily-bar rules include extended-hours trade volume, while those trades need not update daily OHLC. Its daily stream emits aggregate updates after the market opens. A daily bar's timestamp identifies its New York calendar day, so freshness uses receipt time separately. [Alpaca bar aggregation rules](https://docs.alpaca.markets/us/docs/market-data-faq), [Alpaca daily-bar stream](https://docs.alpaca.markets/us/docs/real-time-stock-pricing-data)
+
+The fallback sums only completed, available extended-hours minute bars from 04:00 through 20:00 New York. It can omit the current incomplete minute, missing bars, and trades that do not produce a minute bar under the provider's eligibility rules. It is labeled partial and can differ from the later daily aggregate; missing observations are not invented as zero. When a current daily aggregate arrives, it replaces the fallback. Total day volume always retains the selected feed's coverage.
+
+A newly received response does not make old fallback minutes current. Fallback freshness requires both its receipt time and the latest included completed-minute end to be no more than 120 seconds old. Discovery exposes that actual minute end as `volume_at` and the separate receipt as `volume_received_at`; the monitor's `volume_at` still refers to its regular-session technical minute. Discovery checks fallback freshness before filtering and again after historical enrichment. A stale fallback cannot pass a positive minimum-volume filter. With a zero minimum, the candidate and partial total remain visible, but that total is unavailable for ranking, day RVOL is null, and both inputs earn zero points. Discovery's provider daily aggregates keep their existing 300-second receipt limit; the live monitor requires receipt within 120 seconds.
+
 The regular open is normally 09:30 Eastern; the exchange calendar is authoritative. The provider's daily-bar open is never used for the gap because daily aggregation may include extended hours. If raw `prevDailyBar.c` differs from the split-adjusted previous close by more than 20%, Nomisma warns of a possible corporate action. The gap and day-change reference remains split adjusted; this warning is not a verified split announcement.
 
 IEX covers one exchange, so its volumes, historical baselines, and prices do not represent consolidated US-market activity. SIP requires real-time account entitlement. Neither feed adds OTC coverage to this monitor. Mixing feed coverage when interpreting thresholds can make comparisons misleading.
 
 Float is accepted only as a positive whole count of actual publicly available float shares, at most 10 trillion, with a valid source date no later than the evaluation date. Sources are **FMP**, **Manual**, and **Synthetic**; synthetic float is never used for real rows, or vice versa. The optional FMP `/stable/shares-float` integration uses only `floatShares`, never outstanding shares, percentages, or inferred shares. Manual entries override provider data and are explicitly not provider verified. Provider values may be cached for 24 hours, but this does not refresh their source dates. An old source date remains visible. Missing or invalid float produces unavailable float and turnover; it is not itself an alert-blocking filter.
 
+## Liquidity and volatility metrics
+
+These metrics appear in candidate results and the momentum radar. Historical inputs exclude the active session, require usable OHLCV values, and report the actual history date, expected preceding exchange-session date, and available observation count. Conflicting duplicate daily bars are excluded. Average-volume windows require the matching returned SPY session dates, and ATR requires continuity over its available history; insufficient reference history leaves these metrics unavailable. These checks cannot detect a trading date omitted by the provider for both the stock and SPY. Unavailable metrics stay visible as a dash with an explanation.
+
+| Metric | Definition |
+| --- | --- |
+| Average volume (3M) | Arithmetic mean of volume across 63 prior trading sessions. Three months means this fixed session count, not three calendar months. |
+| Average daily volume (20D) | Arithmetic mean of volume across 20 prior trading sessions. |
+| Day RVOL | Current total day volume divided by the prior 20-session average daily volume. The denominator must be positive. This compares an accumulating day with completed daily sessions and is **not adjusted for time of day**. It differs from the 30-session regular-session RVOL and 1-minute RVOL used elsewhere. |
+| Bid–ask spread | Dollars: `ask − bid`. Percent: `100 × (ask − bid) / ((ask + bid) / 2)`. A usable quote has positive finite bid and ask, ask at least bid, and a nonfuture timestamp no more than 30 seconds old. A valid zero spread remains zero. |
+| Beta versus SPY | Slope `cov(stock return, SPY return) / var(SPY return)` using at most 252 aligned daily simple price returns, with at least 60 observations and positive SPY return variance. Stock and benchmark returns must share the same start and end dates. The observation count is shown; a shorter history is not presented as a full year. |
+| ATR (14) | For each completed daily bar after the first, true range is `max(high − low, abs(high − previous close), abs(low − previous close))`. Seed with the arithmetic mean of 14 true ranges, then apply Wilder smoothing: `(13 × previous ATR + new true range) / 14`. At least 15 prior daily bars are required. |
+| ATR percentage | `100 × daily ATR(14) / the last prior adjusted close`. This permits comparison across different stock prices; the dollar ATR remains visible. |
+
+Candidate discovery refreshes stale, missing, or invalid quotes after historical enrichment, within the existing pool of at most 500 selected symbols and on the same market feed. It requests at most 50 symbols per batch, with two requests in parallel. A new response must still contain a valid same-session provider quote timestamp no more than 30 seconds old, checked again before ranking; receipt time is not quote time. Failures leave the spread unavailable with no spread points. This step changes no trade or volume timestamps and does not broaden the selected pool.
+
+The historical feed uses split-adjusted price and volume. Beta therefore measures price-return sensitivity using that chosen feed, rather than a provider's published total-return or monthly beta. Cash dividends, spin-offs, sampling frequency, the benchmark, and available history can make it differ from other services. A higher positive beta indicates more historical exposure to SPY's moves, not a higher probability of a gain. ATR measures range without predicting direction. [Alpaca adjustment options](https://docs.alpaca.markets/us/reference/stockbars), [Fidelity on beta](https://www.fidelity.com/learning-center/investment-products/etf/smart-beta), [Fidelity on ATR](https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/atr)
+
+## Liquidity/volatility ranking
+
+The default candidate and radar sort ranks observed activity and volatility across the rows in that comparison. It does not replace the technical setup score or its alert guards. Each component receives points according to its percentile among available values in that comparison:
+
+| Component | Direction earning more points | Maximum points |
+| --- | --- | ---: |
+| Total day volume | Higher | 15 |
+| Average volume (3M) | Higher | 10 |
+| Average daily volume (20D) | Higher | 10 |
+| Day RVOL | Higher | 20 |
+| Spread percentage | Lower | 15 |
+| Positive beta versus SPY | Higher | 10 |
+| ATR percentage | Higher | 20 |
+| **Total** | | **100** |
+
+Percentiles use zero-based ranks divided by `available_count − 1`; ties receive their average rank. Spread uses the inverse percentile. A sole available observation receives the component's full points; tied equal values with more than one observation receive half. Missing metrics and stale volume or spread inputs earn zero without redistributing their weight or excluding the entire stock. Zero and negative beta remain measured values but earn no beta points. Each row exposes component values, weights, percentiles, earned points, and metric availability. Overall ties use ticker order.
+
+Discovery first applies the selected search filters, then enriches at most the 500 qualifying symbols with the highest total day volume. It ranks that enriched comparison group before applying the requested result limit. Coverage identifies the examined and unexamined pool; this is not a ranking of every listing by every metric. The radar ranks its own configured rows. Scores can change when the comparison group changes even if a stock's raw values do not. Sorting a raw metric displays high-to-low numbers with unavailable values last; a high raw spread is still a wider spread, even though the composite rewards narrower spreads.
+
+High volume, beta, and ATR favor active or volatile stocks by design. The three volume inputs overlap, and a narrow displayed spread does not establish available size or an executable fill. These weights express a research preference, not estimated returns or independent confirmations.
+
 ## Missing history and alert eligibility
 
-Nomisma conservatively requires uninterrupted minute coverage from the exact regular open through the latest completed minute before reporting regular-session volume or session VWAP. A missing minute may mean no trades or incomplete delivery. Until coverage is complete, session volume, VWAP, session RVOL, and float turnover are unavailable and alerts are blocked. The chart still shows available bars, and provider feed-day volume may display with its separate receipt timestamp. Periodic history reconciliation can repair missing delivery; it does not invent zero-volume bars.
+Regular-session volume and session VWAP are calculated from the regular-session minute bars received, starting with the exact opening minute. A missing later minute has no trades, typically a trading halt, so it does not change either total; it is reported as a data note. If the opening minute is missing or a bar is malformed, session volume, VWAP, session RVOL and float turnover are unavailable and alerts are blocked. Provider feed-day volume may still display with its separate receipt timestamp. Periodic history reconciliation can repair missing delivery; it does not invent zero-volume bars.
 
 These requirements apply to both Buy and Strong buy setups:
 
@@ -44,9 +89,9 @@ These requirements apply to both Buy and Strong buy setups:
 - The evaluation clock is within the regular exchange session: open inclusive, close exclusive.
 - A valid trade and a valid two-sided quote are each no more than 30 seconds old; future timestamps never pass.
 - The latest completed minute's end is no more than 120 seconds old.
-- All required prior-30-session daily bars exist and their average volume is positive; the adjusted close matches the immediately preceding calendar session.
-- Minute history has complete regular-session coverage and at least 21 contiguous recent completed minutes with a positive preceding-20-minute volume mean.
-- Session volume, latest displayed price, completed minute close, minute RVOL, and spread meet configured limits.
+- The exchange calendar of prior sessions is valid and the adjusted close of the immediately preceding session exists. Recent listings with fewer than 30 prior sessions can alert; their 30-session volume baseline is shown as unavailable.
+- Minute history starts at the regular open (later halt gaps are allowed) and has at least 21 contiguous recent completed minutes.
+- Regular-session volume (premarket excluded), latest displayed price, and completed minute close meet configured limits. Minute RVOL and spread are shown but do not gate alerts.
 - The completed minute close is above session VWAP, and EMA9 is above EMA20.
 
 Missing numbers are null/unavailable, not zero or passing conditions. An ineligible row is Watch and lists its blockers even when some technical conditions earn points. A row can pass data gates but remain Watch because its score is below Buy. Halt and news detection are not guaranteed; fresh data alone does not establish executable liquidity.
@@ -61,14 +106,16 @@ EMA9 and EMA20 use completed minute closes. Each EMA starts with its initial per
 | EMA9 is above EMA20 | 20 |
 | EMA9 rose from the preceding completed minute | 10 |
 | RSI14 is between 50 and 75 inclusive | 15 |
-| Minute RVOL meets the configured minimum, default 1.5× | 15 |
+| Minute RVOL is at least 1.5× | 15 |
 | Completed minute close exceeds every high of the preceding five completed minutes | 10 |
 | Completed minute close is above the split-adjusted previous-session close | 10 |
 | **Maximum** | **100** |
 
 Each condition earns its full allocation or zero. Comparisons use unrounded values. The detail report exposes earned points, maximum points, and descriptions. A strong trade price does not substitute for the completed close in breakout, VWAP, RSI, or positive-session scoring.
 
-Default eligibility limits are $0.50–$5, at least 100,000 completed regular-session shares, minute RVOL at least 1.5×, and spread at most 2%. With every gate satisfied, scores of at least 65 yield **Buy setup**, and at least 85 yield **Strong buy setup**. Thresholds and liquidity limits are editable; Buy must remain below Strong buy. These defaults are not optimized estimates of profitability. Formula definitions are in [monitor_metrics.py](nomisma/monitor_metrics.py).
+Default eligibility limits are $0.50–$5 and at least 100,000 regular-session shares. With every gate satisfied, scores of at least 65 yield **Buy setup**, and at least 85 yield **Strong buy setup**. Thresholds and liquidity limits are editable; Buy must remain below Strong buy. These defaults are not optimized estimates of profitability. Formula definitions are in [monitor_metrics.py](nomisma/monitor_metrics.py).
+
+For compatibility, the saved API setting remains named `min_session_volume`; it now applies to total day volume, including available premarket activity. Existing numeric settings are retained, and the UI labels the basis explicitly. Complete regular-session minute history is still required for session VWAP and technical alerts; using total volume for this threshold does not bypass those guards.
 
 ## Alert confirmation, repeats, and delivery
 
@@ -104,6 +151,8 @@ Filters run on unrounded indicator values, apart from the deliberately rounded s
 
 ## Interpretation limits
 
+The built-in **research trade planner** is a separate deterministic calculation applied after an alert. It uses minute ATR for conditional entry/stop/target levels and explicit account, cost and liquidity assumptions for hypothetical position size. A holding limit is a policy deadline, not a predicted price peak. The default parameters are unvalidated; no historical fitting, trading performance or order execution is implied. Its lower-entry, one-share-partial reward/risk gate and full derivation are in [TRADE_PLANNER.md](TRADE_PLANNER.md). Existing observed-outcome windows remain unchanged and are not used as simulated fills.
+
 Strong trend, momentum, and volume can reverse. Indicators overlap and are not independent confirmations. Current listing universes omit delisted stocks, and adjusted data may be revised, so future strategy testing must explicitly address survivorship bias and point-in-time data. A credible probability model would also require a defined holding period/target, out-of-sample testing, transaction costs, and ongoing calibration. Daily histories alone do not account for earnings, news, liquidity at execution, or personal suitability.
 
 
@@ -120,3 +169,7 @@ Adverse excursion (%) = min(0, 100 × (minimum low across the complete window / 
 Observations require exact symbol, source, feed, and session identity, positive prices, and contiguous completed future minutes. Future-dated bars are excluded. Missing minutes make a due observation unavailable until repaired; a window extending beyond the exchange close is unavailable. Historical observations remain saved after changing the monitor's session or symbols. Corrections can revise observed outcomes while leaving the original alert intact. No execution, spread, commissions, slippage, or portfolio returns are simulated.
 
 Current-session trading-status messages, when subscribed and received, distinguish halted/paused states from full trading resumption. Missing or unknown status is labeled unavailable and never interpreted as proof of uninterrupted trading. Explicit halts suppress alerts. Limit-price bands retain their provider timestamp and availability independently of setup scoring.
+
+### Stocks-only instrument eligibility
+
+Live candidate discovery, daily Alpaca/CSV screening, and manually selected live symbols require a match in Nasdaq Trader’s public Nasdaq-listed and other-listed symbol directories. Only non-test, non-ETF common/ordinary stocks or depositary shares with recognizable descriptions are allowed. Names indicating funds, trusts, notes, bonds, preferred shares, warrants, rights or units are excluded. Ambiguous descriptions are excluded conservatively; some legitimate company securities may therefore be omitted. Directories are cached for one hour; a failed refresh blocks screening rather than admitting unverified instruments. No brokerage credentials are sent to the directory service. SPY remains an internal market benchmark, never a candidate. Synthetic demo fixtures and historical saved results retain their original provenance.

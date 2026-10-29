@@ -415,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
           const desktop = Object.freeze({
             configFile:config.configFile, dataDirectory:config.dataDirectory,
             print:() => send('print'),
+            fullScreen:(on) => send('fullScreen', {on:!!on}),
             notificationClicked:(id, symbol) => {
               const item = notifications.get(id);
               if (item) {
@@ -634,6 +635,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let result = operation.run()
             isPrinting = false
             replyHandler(result, nil)
+        case "fullScreen":
+            // The candle chart fills the window; the native window supplies true full screen.
+            if (body["on"] as? Bool ?? false) != window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
+            replyHandler(true, nil)
         default: replyHandler(nil, "Unknown desktop action.")
         }
     }

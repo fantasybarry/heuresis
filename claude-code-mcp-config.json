@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "sdl-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "sdl-mcp"
+      ],
+      "env": {
+        "SDL_CONFIG": "/Users/barry/heuresis/.sdl-mcp/sdlmcp.config.json"
+      }
+    }
+  }
+}

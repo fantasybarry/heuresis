@@ -121,6 +121,23 @@ class MonitorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.acknowledge_monitor_alerts("nonexistent")
 
+    def test_snapshot_scopes_to_configured_source_before_newer_demo_alert_limit(self):
+        self.store.save_monitor_alert({"id": "older-real", "source": "alpaca", "feed": "iex",
+            "created_at": "2026-09-08T15:00:00+00:00", "snapshot": {"price": 2.5}}, {})
+        for number in range(105):
+            self.store.save_monitor_alert({"id": "newer-demo-%03d" % number,
+                "source": "demo", "feed": "synthetic", "created_at": "2026-09-09T15:00:00+00:00"}, {})
+        self.assertEqual(len(self.monitor.snapshot()["alerts"]), 100)
+        self.monitor.save_config({"source": "alpaca"})
+        for compact in (False, True):
+            snapshot = self.monitor.snapshot(compact=compact)
+            self.assertFalse(snapshot["status"]["running"])
+            self.assertEqual([row["id"] for row in snapshot["alerts"]], ["older-real"])
+        self.assertEqual(self.store.monitor_alerts_total(), 106)
+        self.assertEqual(self.store.monitor_alert("older-real")["snapshot"], {"price": 2.5})
+        self.monitor.save_config({"source": "demo"})
+        self.assertTrue(all(row["source"] == "demo" for row in self.monitor.snapshot()["alerts"]))
+
     def test_configuration_persists_and_live_credentials_are_required(self):
         self.monitor.save_config({"symbols": ["aapl"], "buy_score": 70})
         self.assertEqual(LiveMonitor(self.store).config["symbols"], ["AAPL"])
@@ -177,6 +194,188 @@ class MonitorTests(unittest.TestCase):
         self.monitor.config["source"] = "alpaca"
         return bundle, timestamp(bundle["as_of"])
 
+    def wait_for_refresh(self):
+        deadline = time.monotonic() + 2
+        while self.monitor.snapshot(compact=True)["status"]["refresh"]["state"] == "loading" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return self.monitor.snapshot(compact=True)["status"]["refresh"]
+
+    def test_refresh_rejects_stopped_and_connecting_without_starting_or_changing_source(self):
+        original = copy.deepcopy(self.monitor.config)
+        with patch("nomisma.monitor.load_live_seed") as load, patch("nomisma.monitor.stream_live") as stream:
+            with self.assertRaisesRegex(MonitorBusy, "Start monitoring"):
+                self.monitor.refresh()
+            self.monitor.status.update(running=True, connection="loading")
+            with self.assertRaisesRegex(MonitorBusy, "Wait"):
+                self.monitor.refresh()
+        self.assertEqual(self.monitor.config, original)
+        load.assert_not_called()
+        stream.assert_not_called()
+
+    def test_explicit_refresh_is_async_and_preserves_stream_events_and_alert_dedup(self):
+        bundle, now = self.prepare_stream()
+        refreshed = copy.deepcopy(bundle)
+        self.monitor.tracker["existing"] = {"bar": "saved"}
+        generation, stop = self.monitor.generation, self.monitor.stop_event
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def loading(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return refreshed
+
+        with patch("nomisma.monitor.load_live_seed", side_effect=loading) as load, \
+                patch("nomisma.monitor.stream_live") as stream:
+            result = self.monitor.refresh()
+            self.assertEqual(result["status"]["refresh"]["state"], "loading")
+            self.assertTrue(entered.wait(1))
+            with self.assertRaisesRegex(MonitorBusy, "already running"):
+                self.monitor.refresh()
+            with patch("nomisma.monitor.utcnow", return_value=now):
+                self.monitor._on_event({"T": "t", "S": "DEMO", "t": (now + timedelta(seconds=1)).isoformat(), "p": 3.21},
+                                      self.monitor.config, generation, stop)
+            release.set()
+            self.assertEqual(self.wait_for_refresh()["state"], "completed")
+            self.assertTrue(load.call_args.kwargs["refresh"])
+        stream.assert_not_called()
+        self.assertEqual(bundle["assets"][0]["snapshot"]["latestTrade"]["p"], 3.21)
+        self.assertEqual(self.monitor.tracker, {"existing": {"bar": "saved"}})
+        self.assertEqual(self.store.monitor_alerts(), [])
+        self.assertEqual(self.monitor.generation, generation)
+        self.assertIs(self.monitor.stop_event, stop)
+        self.assertFalse(stop.is_set())
+
+    def test_stop_cancels_pending_refresh_and_late_result_cannot_install(self):
+        bundle, _ = self.prepare_stream()
+        fresh = copy.deepcopy(bundle)
+        fresh["assets"][0]["float"] = {"shares": 999, "source": "FMP", "as_of": "2025-05-13"}
+        original = copy.deepcopy(bundle)
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def loading(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            finished.set()
+            return fresh
+
+        with patch("nomisma.monitor.load_live_seed", side_effect=loading):
+            self.monitor.refresh()
+            self.assertTrue(entered.wait(1))
+            self.monitor.stop()
+            release.set()
+            self.assertTrue(finished.wait(1))
+        self.assertEqual(self.monitor.snapshot()["status"]["refresh"]["state"], "cancelled")
+        self.assertEqual(self.monitor.bundle, original)
+        self.assertFalse(self.monitor.status["running"])
+
+    def test_refresh_failure_is_sanitized_and_keeps_existing_data(self):
+        bundle, _ = self.prepare_stream()
+        original = copy.deepcopy(bundle)
+        with patch("nomisma.monitor.load_live_seed", side_effect=ValueError("https://provider/?key=private-secret")):
+            self.monitor.refresh()
+            status = self.wait_for_refresh()
+        self.assertEqual(status["state"], "error")
+        self.assertNotIn("private-secret", status["error"])
+        self.assertEqual(self.monitor.bundle, original)
+        self.assertEqual(self.monitor.status["connection"], "live")
+
+    def test_refresh_cannot_replace_current_feed(self):
+        bundle, _ = self.prepare_stream()
+        wrong = copy.deepcopy(bundle)
+        wrong["feed"] = "sip"
+        with patch("nomisma.monitor.load_live_seed", return_value=wrong):
+            self.monitor.refresh()
+            self.assertEqual(self.wait_for_refresh()["state"], "error")
+        self.assertEqual(self.monitor.bundle["feed"], "iex")
+
+    def test_provider_subscription_limit_stops_instead_of_reseeding_forever(self):
+        from nomisma.live_data import LiveSubscriptionLimit
+        bundle, _ = self.prepare_stream()
+        with patch("nomisma.monitor.load_live_seed", return_value=bundle) as load, \
+                patch("nomisma.monitor.stream_live", side_effect=LiveSubscriptionLimit("Reduce the symbol list.")) as stream:
+            self.monitor._worker(self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual(self.monitor.status["connection"], "error")
+        self.assertFalse(self.monitor.status["running"])
+        self.assertIn("Reduce", self.monitor.status["error"])
+
+    def test_demo_refresh_keeps_current_minute_and_alert_history(self):
+        self.monitor.bundle = demo_bundle(["DEMO"], step=10)
+        self.monitor.status.update(running=True, connection="demo")
+        original = copy.deepcopy(self.monitor.bundle)
+        with patch("nomisma.monitor.load_live_seed") as load:
+            self.monitor.refresh()
+            self.assertEqual(self.wait_for_refresh()["state"], "completed")
+        self.assertEqual(self.monitor.bundle, original)
+        self.assertEqual(self.store.monitor_alerts(), [])
+        load.assert_not_called()
+
+    def test_compact_fifty_symbol_snapshot_omits_charts_but_detail_keeps_them(self):
+        symbols = ["S%s" % index for index in range(50)]
+        self.monitor.save_config({"symbols": symbols})
+        self.monitor.bundle = demo_bundle(symbols, step=20)
+        full = self.monitor.snapshot()
+        compact = self.monitor.snapshot(compact=True)
+        self.assertEqual(compact["limits"]["max_symbols"], 50)
+        self.assertEqual(len(compact["rows"]), 50)
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(full)) * 0.3)
+        self.assertTrue(all("chart" not in row and "volume_history" not in row for row in compact["rows"]))
+        details = self.monitor.row_detail("s0")
+        self.assertEqual(details["chart"], full["rows"][0]["chart"])
+        details["chart"].clear()
+        self.assertTrue(self.monitor.row_detail("S0")["chart"])
+        self.assertIsNone(self.monitor.row_detail("UNKNOWN"))
+
+    def test_premarket_volume_continues_across_open_and_corrections_replace_not_add(self):
+        bundle, _ = self.prepare_stream()
+        asset = bundle["assets"][0]
+        opening = timestamp(bundle["session"]["open"])
+        premarket = opening - timedelta(minutes=1)
+        original = {"t": premarket.isoformat(), "open": 2, "high": 2.1, "low": 1.9, "close": 2, "volume": 600, "vwap": 2}
+        asset["minutes"] = []
+        asset["snapshot"]["dailyBar"]["t"] = (opening - timedelta(days=1)).isoformat()
+        asset["snapshot"]["_extended_day"] = {"volume": 600, "as_of": opening.isoformat(),
+            "received_at": opening.isoformat(), "minutes": [original]}
+        event = {"T": "b", "S": "DEMO", "t": opening.isoformat(), "o": 2, "h": 2.1, "l": 1.9, "c": 2, "v": 100, "vw": 2}
+        now = opening + timedelta(minutes=1)
+        with patch("nomisma.monitor.utcnow", return_value=now):
+            self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+            self.assertEqual(self.monitor.snapshot()["rows"][0]["day_volume"], 700)
+            self.monitor._on_event(dict(event, T="u", v=150), self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+            current = self.monitor.snapshot()["rows"][0]
+            self.assertEqual(current["day_volume"], 750)
+            self.assertEqual(current["session_volume"], 150)
+            self.monitor._on_event({"T": "d", "S": "DEMO", "t": opening.isoformat(), "v": 900},
+                                   self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+            self.assertEqual(self.monitor.snapshot()["rows"][0]["day_volume"], 900)
+        self.assertEqual(self.store.monitor_alerts(), [])
+
+    def test_refresh_preserves_new_premarket_minutes_and_installs_benchmark_history(self):
+        bundle, _ = self.prepare_stream()
+        opening = timestamp(bundle["session"]["open"])
+        now = opening - timedelta(minutes=1)
+        minute = {"t": (now - timedelta(minutes=1)).isoformat(), "open": 2, "high": 2.1,
+                  "low": 1.9, "close": 2, "volume": 600, "vwap": 2}
+        asset = bundle["assets"][0]
+        asset["snapshot"]["_extended_day"] = {"volume": 600, "as_of": now.isoformat(), "received_at": now.isoformat(), "minutes": [minute]}
+        refreshed = copy.deepcopy(bundle)
+        refreshed["benchmark_bars"] = [{"date": "2025-05-13", "close": 500}]
+
+        def during_request(*args, **kwargs):
+            event = {"T": "u", "S": "DEMO", "t": minute["t"], "o": 2, "h": 2.1, "l": 1.9, "c": 2, "v": 700, "vw": 2}
+            with patch("nomisma.monitor.time.monotonic", return_value=101), patch("nomisma.monitor.utcnow", return_value=now):
+                self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+            return refreshed
+
+        with patch("nomisma.monitor.load_live_seed", side_effect=during_request), patch("nomisma.monitor.time.monotonic", return_value=100):
+            self.assertTrue(self.monitor._reload_seed(self.monitor.config, self.monitor.generation,
+                                                     self.monitor.stop_event, self.monitor.connection_epoch))
+        self.assertEqual(asset["snapshot"]["_extended_day"]["volume"], 700)
+        self.assertEqual(bundle["benchmark_bars"], refreshed["benchmark_bars"])
+
     def test_updated_bar_replaces_volume_without_double_counting(self):
         bundle, now = self.prepare_stream()
         original = copy.deepcopy(bundle["assets"][0]["minutes"][-1])
@@ -212,6 +411,18 @@ class MonitorTests(unittest.TestCase):
         event["t"] = next_day.isoformat()
         with patch("nomisma.monitor.utcnow", return_value=next_day), self.assertRaisesRegex(ValueError, "new trading session"):
             self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+
+    def test_bar_arriving_just_before_lagging_local_clock_ends_its_minute_is_evaluated(self):
+        bundle, _ = self.prepare_stream()
+        last = bundle["assets"][0]["minutes"][-1]
+        stamp = timestamp(last["t"]) + timedelta(minutes=1)
+        event = {"T": "b", "S": "DEMO", "t": stamp.isoformat(), "o": last["close"], "h": last["close"],
+                 "l": last["close"], "c": last["close"], "v": last["volume"], "vw": last["close"]}
+        arrival = stamp + timedelta(minutes=1) - timedelta(milliseconds=100)
+        with patch("nomisma.monitor.utcnow", return_value=arrival), patch.object(self.monitor, "_evaluate_alerts") as evaluate:
+            self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+        self.assertEqual(bundle["assets"][0]["minutes"][-1]["t"], event["t"])
+        evaluate.assert_called_once()
 
     def test_replayed_completed_bars_do_not_trigger_seeded_latest_setup(self):
         bundle, now = self.prepare_stream()
@@ -274,6 +485,80 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(bundle["assets"][0]["bars"], refreshed["assets"][0]["bars"])
         self.assertEqual(bundle["assets"][0]["snapshot"]["dailyBar"]["v"], 1000)
 
+    def test_refresh_cannot_restore_trade_cancelled_or_corrected_during_request(self):
+        for kind, identifier_key in (("x", "i"), ("c", "oi")):
+            with self.subTest(event=kind):
+                bundle, now = self.prepare_stream()
+                snapshot = bundle["assets"][0]["snapshot"]
+                snapshot["latestTrade"] = {"t": now.isoformat(), "p": 2.5, "i": 77}
+                refreshed = copy.deepcopy(bundle)
+
+                def during_request(*args, **kwargs):
+                    event = {"T": kind, "S": "DEMO", "t": now.isoformat(), identifier_key: 77}
+                    with patch("nomisma.monitor.time.monotonic", return_value=101), patch("nomisma.monitor.utcnow", return_value=now):
+                        self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+                    self.assertNotIn("latestTrade", snapshot)
+                    return refreshed
+
+                with patch("nomisma.monitor.load_live_seed", side_effect=during_request), \
+                        patch("nomisma.monitor.time.monotonic", return_value=100):
+                    self.assertTrue(self.monitor._reload_seed(self.monitor.config, self.monitor.generation,
+                                                             self.monitor.stop_event, self.monitor.connection_epoch, force=True))
+                self.assertNotIn("latestTrade", snapshot)
+                self.assertEqual(self.store.monitor_alerts(), [])
+
+    def test_inflight_refresh_preserves_received_trade_and_quote_even_with_later_rest_timestamp(self):
+        for kind, field in (("t", "latestTrade"), ("q", "latestQuote")):
+            with self.subTest(event=kind):
+                bundle, now = self.prepare_stream()
+                refreshed = copy.deepcopy(bundle)
+                refreshed["assets"][0]["snapshot"][field]["t"] = (now + timedelta(seconds=1)).isoformat()
+                event = {"T": kind, "S": "DEMO", "t": now.isoformat(), "p": 3.2, "bp": 3.19, "ap": 3.21}
+                accepted_at = now + timedelta(milliseconds=250)
+                refresh_at = now + timedelta(seconds=2)
+                expected = dict(event, _received_at=accepted_at.isoformat()) if kind == "q" else event
+                if kind == "q":
+                    refreshed["assets"][0]["snapshot"][field]["_received_at"] = refresh_at.isoformat()
+
+                def during_request(*args, **kwargs):
+                    # Equal monotonic clock ticks still count as in-flight.
+                    with patch("nomisma.monitor.time.monotonic", return_value=100), patch("nomisma.monitor.utcnow", return_value=accepted_at):
+                        self.monitor._on_event(event, self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+                    self.assertEqual(bundle["assets"][0]["snapshot"][field], expected)
+                    return refreshed
+
+                with patch("nomisma.monitor.load_live_seed", side_effect=during_request), \
+                        patch("nomisma.monitor.time.monotonic", return_value=100), \
+                        patch("nomisma.monitor.utcnow", return_value=refresh_at):
+                    self.assertTrue(self.monitor._reload_seed(self.monitor.config, self.monitor.generation,
+                                                             self.monitor.stop_event, self.monitor.connection_epoch))
+                # Preserve the entire streamed event and its original quote
+                # receipt; refresh must neither remove nor restamp metadata.
+                self.assertEqual(bundle["assets"][0]["snapshot"][field], expected)
+
+    def test_refresh_updated_at_never_rolls_back_newer_stream_receipt(self):
+        bundle, now = self.prepare_stream()
+        refreshed = copy.deepcopy(bundle)
+        refreshed["as_of"] = now.isoformat()
+        later = now + timedelta(seconds=1)
+
+        def during_request(*args, **kwargs):
+            with patch("nomisma.monitor.utcnow", return_value=later):
+                self.monitor._on_event({"T": "t", "S": "DEMO", "t": later.isoformat(), "p": 3.2},
+                                      self.monitor.config, self.monitor.generation, self.monitor.stop_event)
+            return refreshed
+
+        with patch("nomisma.monitor.load_live_seed", side_effect=during_request):
+            self.assertTrue(self.monitor._reload_seed(self.monitor.config, self.monitor.generation,
+                                                     self.monitor.stop_event, self.monitor.connection_epoch))
+        self.assertEqual(self.monitor.status["updated_at"], later.isoformat())
+        newer = later + timedelta(seconds=1)
+        refreshed["as_of"] = newer.isoformat()
+        with patch("nomisma.monitor.load_live_seed", return_value=refreshed):
+            self.monitor._reload_seed(self.monitor.config, self.monitor.generation,
+                                      self.monitor.stop_event, self.monitor.connection_epoch)
+        self.assertEqual(self.monitor.status["updated_at"], newer.isoformat())
+
     def test_reconciliation_from_old_connection_cannot_replace_new_seed(self):
         bundle, now = self.prepare_stream()
         old = copy.deepcopy(bundle)
@@ -295,7 +580,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("demo,synthetic", content)
 
     def journal_alert(self):
-        self.monitor.config.update(confirmation_bars=1, min_relative_volume=0)
+        self.monitor.config.update(confirmation_bars=1)
         self.monitor.bundle = demo_bundle(["DEMO"], step=10)
         row = build_rows(self.monitor.bundle, self.monitor.config, now=self.monitor.bundle["as_of"])[0]
         self.assertTrue(row["alert_eligible"])

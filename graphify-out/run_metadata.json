@@ -1,0 +1,14 @@
+{
+  "graphify_version": "0.9.65",
+  "root": "/Users/barry/heuresis",
+  "files_detected": 116,
+  "source_files_stamped": 116,
+  "semantic_files_unstamped": [],
+  "agents": {
+    "infra_engineer": "project documentation",
+    "researcher": "research notes",
+    "reviewer": "four reference images"
+  },
+  "token_usage_status": "unavailable",
+  "validation": "semantic schema, coverage, graph integrity, JSON/HTML parity, benchmark"
+}

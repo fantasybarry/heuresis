@@ -10,36 +10,35 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .engine import _ema, _rsi
+from .engine import _ema, _number, _rsi
+from .planning_data import _iso, _time, capture_planning_quote
+from .screening_metrics import history_metrics, rank_rows
 
+
+MAX_MONITOR_SYMBOLS = 50
 
 DEFAULT_MONITOR_CONFIG = {
     "source": "demo", "symbols": ["DEMO", "MOMO", "GAP"],
     "min_price": 0.5, "max_price": 5, "min_session_volume": 100000,
-    "min_relative_volume": 1.5, "max_spread_pct": 2,
     "buy_score": 65, "strong_buy_score": 85, "confirmation_bars": 2,
     "cooldown_seconds": 300, "alerts_enabled": True,
 }
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9]{0,9}(?:[.\-][A-Z0-9]{1,4})?\Z")
 _BOUNDS = {
     "min_price": (0.000001, 1000000), "max_price": (0.000001, 1000000),
-    "min_session_volume": (0, 1000000000000), "min_relative_volume": (0, 1000),
-    "max_spread_pct": (0.01, 20), "buy_score": (0, 100),
+    "min_session_volume": (0, 1000000000000), "buy_score": (0, 100),
     "strong_buy_score": (0, 100), "confirmation_bars": (1, 5),
     "cooldown_seconds": (30, 3600),
 }
+# Former alert gates; saved configurations that still carry them load without them.
+_RETIRED_SETTINGS = ("min_relative_volume", "max_spread_pct")
+# Minute RVOL still earns the "Minute participation" score points at the former default.
+_PARTICIPATION_RVOL = 1.5
 _UTC = timezone.utc
 _NY = ZoneInfo("America/New_York")
 _MINUTE = timedelta(minutes=1)
-
-
-def _number(value, minimum=0, maximum=1000000000000000):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(value) and minimum <= value <= maximum
-    except (ValueError, OverflowError):
-        return False
+# Exchange timestamps can run slightly ahead of a lagging local clock; a strict check drops the newest trades.
+_CLOCK_SKEW = timedelta(seconds=2)
 
 
 def validate_monitor_config(payload, current=None):
@@ -48,6 +47,7 @@ def validate_monitor_config(payload, current=None):
         raise ValueError("Monitor configuration must be an object.")
     result = dict(DEFAULT_MONITOR_CONFIG)
     for item in (current or {}, payload):
+        item = {key: value for key, value in item.items() if key not in _RETIRED_SETTINGS}
         unknown = set(item) - set(DEFAULT_MONITOR_CONFIG)
         if unknown:
             raise ValueError("Unknown monitor setting: {}.".format(", ".join(sorted(map(str, unknown)))))
@@ -67,8 +67,8 @@ def validate_monitor_config(payload, current=None):
     if result["buy_score"] >= result["strong_buy_score"]:
         raise ValueError("buy_score must be below strong_buy_score.")
     symbols = result["symbols"]
-    if not isinstance(symbols, list) or not 1 <= len(symbols) <= 20:
-        raise ValueError("symbols must be a list of 1 to 20 ticker symbols.")
+    if not isinstance(symbols, list) or not 1 <= len(symbols) <= MAX_MONITOR_SYMBOLS:
+        raise ValueError("symbols must be a list of 1 to {} ticker symbols.".format(MAX_MONITOR_SYMBOLS))
     normalized = []
     for symbol in symbols:
         if not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol.strip().upper()):
@@ -87,22 +87,6 @@ def _date(value):
         return date.fromisoformat(value)
     except ValueError:
         return None
-
-
-def _time(value):
-    if isinstance(value, str):
-        try:
-            value = re.sub(r"(\.\d{6})\d+(?=Z|[+-]\d\d:\d\d$)", r"\1", value)
-            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        return None
-    return value.astimezone(_UTC)
-
-
-def _iso(value):
-    return value.isoformat() if value is not None else None
 
 
 def _ohlcv(raw):
@@ -163,7 +147,7 @@ def _pct(value, reference):
 
 
 def _fresh(stamp, now, seconds):
-    return stamp is not None and 0 <= (now - stamp).total_seconds() <= seconds
+    return stamp is not None and -_CLOCK_SKEW.total_seconds() <= (now - stamp).total_seconds() <= seconds
 
 
 def build_rows(bundle, config, now=None):
@@ -209,6 +193,8 @@ must never make a fresh trade or quote change the completed-bar setup score.
         blockers, warnings = [], []
         minutes, invalid_minutes = _minutes(asset.get("minutes"), session_open, session_close, now)
         daily = _daily(asset.get("bars"), session_date)
+        screening = history_metrics(asset.get("bars", []), bundle.get("benchmark_bars", []),
+                                    session.get("date"), previous_session_date=session.get("previous_date"))
         history = ([bar for bar in daily if bar["date"] in prior_dates]
                    if valid_calendar_history else daily[-30:])
         full_history = valid_calendar_history and len(history) == 30
@@ -219,9 +205,11 @@ must never make a fresh trade or quote change the completed-bar setup score.
         last = minutes[-1] if minutes else None
         volume_at = last["t"] + _MINUTE if last else None
         has_opening = bool(minutes) and minutes[0]["t"] == session_open
-        complete_coverage = has_opening and not invalid_minutes and all(
-            current["t"] - previous["t"] == _MINUTE
-            for previous, current in zip(minutes, minutes[1:]))
+        # A missing minute has no trades (often a trading halt), so totals and VWAP from the
+        # minutes received stay exact; only a missing opening minute or a malformed bar withholds them.
+        complete_coverage = has_opening and not invalid_minutes
+        gap_minutes = sum(int((current["t"] - previous["t"]) / _MINUTE) - 1
+                          for previous, current in zip(minutes, minutes[1:]))
         session_volume = math.fsum(bar["volume"] for bar in minutes) if complete_coverage else None
         relative_volume = session_volume / average_30d if session_volume is not None and average_30d else None
         contiguous = len(minutes) >= 21 and all(
@@ -242,7 +230,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
         status_at = _time(raw_status.get("t")) if isinstance(raw_status, dict) else None
         status_code = str(raw_status.get("sc", "")) if isinstance(raw_status, dict) else ""
         halt_codes = {"2", "F", "H", "Q", "P"}
-        known_status = bool(status_at and status_at <= now and status_at.astimezone(_NY).date() == session_date
+        known_status = bool(status_at and status_at <= now + _CLOCK_SKEW and status_at.astimezone(_NY).date() == session_date
                             and status_code in halt_codes | {"3", "T"})
         trading_status = {"available": known_status, "code": status_code if known_status else None,
                           "reason": (raw_status.get("rm") or raw_status.get("sm")) if known_status else "Trading status unavailable; no current-session status event has been received.",
@@ -250,7 +238,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
                           "halted": status_code in halt_codes if known_status else None}
         raw_bands = snapshot.get("priceBands") or {}
         bands_at = _time(raw_bands.get("t")) if isinstance(raw_bands, dict) else None
-        valid_bands = bool(bands_at and bands_at <= now and bands_at.astimezone(_NY).date() == session_date
+        valid_bands = bool(bands_at and bands_at <= now + _CLOCK_SKEW and bands_at.astimezone(_NY).date() == session_date
                            and _number(raw_bands.get("u"), 0.000001, 1e9) and _number(raw_bands.get("d"), 0.000001, 1e9)
                            and raw_bands["d"] <= raw_bands["u"])
         price_bands = {"available": valid_bands, "upper": raw_bands["u"] if valid_bands else None,
@@ -264,13 +252,27 @@ must never make a fresh trade or quote change the completed-bar setup score.
         day_volume_at = _time(snapshot.get("_daily_received_at") or snapshot.get("_received_at"))
         if not valid_daily_volume or day_volume_at is None or day_volume_at > now:
             day_volume_at = None
+        day_volume_basis = "Provider total day volume including extended hours"
+        if not valid_daily_volume:
+            extended = snapshot.get("_extended_day") or {}
+            extended_as_of = _time(extended.get("as_of")) if isinstance(extended, dict) else None
+            if (extended_as_of and extended_as_of <= now and extended_as_of.astimezone(_NY).date() == session_date
+                    and _number(extended.get("volume"), 0, 1000000000000)):
+                day_volume = extended["volume"]
+                day_volume_at = _time(extended.get("received_at"))
+                if not _fresh(extended_as_of, now, 120) or day_volume_at is None or day_volume_at > now:
+                    day_volume_at = None
+                day_volume_basis = "Completed extended-hours minute bars since 04:00 New York"
+                warnings.append("Premarket total uses completed extended-hours minute bars. Some volume-only trades are excluded from these bars, so this may understate total trading until provider daily volume is available.")
+        day_volume_fresh = day_volume is not None and _fresh(day_volume_at, now, 120)
+        day_relative_volume = day_volume / screening["avg_daily_volume"] if day_volume_fresh and screening["avg_daily_volume"] else None
         trade = snapshot.get("latestTrade") if isinstance(snapshot.get("latestTrade"), dict) else {}
         quote = snapshot.get("latestQuote") if isinstance(snapshot.get("latestQuote"), dict) else {}
         trade_at, quote_at = _time(trade.get("t")), _time(quote.get("t"))
-        valid_trade = trade_at is not None and trade_at <= now and _number(trade.get("p"), 0.000001, 1000000000)
+        valid_trade = trade_at is not None and trade_at <= now + _CLOCK_SKEW and _number(trade.get("p"), 0.000001, 1000000000)
         price = trade["p"] if valid_trade else last["close"] if last else None
         price_at = trade_at if valid_trade else volume_at
-        valid_quote = (quote_at is not None and quote_at <= now
+        valid_quote = (quote_at is not None and quote_at <= now + _CLOCK_SKEW
                        and _number(quote.get("bp"), 0.000001, 1000000000)
                        and _number(quote.get("ap"), 0.000001, 1000000000)
                        and quote["ap"] >= quote["bp"])
@@ -324,11 +326,13 @@ must never make a fresh trade or quote change the completed-bar setup score.
             blockers.append("Completed minute volume is missing or more than 120 seconds old.")
         if invalid_minutes:
             blockers.append("Malformed regular-session minute bars were excluded; volume history may be incomplete.")
-        if not complete_coverage:
-            blockers.append("Regular-session minute history has incomplete coverage; session volume, daily relative volume and VWAP are unavailable.")
-            warnings.append("A missing minute can mean no trades or missing data. Totals are withheld until complete regular-session coverage is available.")
-        if not full_history:
-            blockers.append("Thirty prior completed daily sessions matching the exchange calendar are required for the volume baseline.")
+        if gap_minutes:
+            warnings.append("{} regular-session minute(s) had no bars (no trades or a trading halt); session volume and VWAP use the minutes received.".format(gap_minutes))
+        # Recent listings can alert; no alert condition uses the 30-session baseline.
+        if not valid_calendar_history:
+            blockers.append("The exchange calendar of prior sessions is unavailable or invalid.")
+        elif not full_history:
+            warnings.append("Fewer than thirty prior completed daily sessions (often a recent listing); the 30-session volume baseline and session RVOL are unavailable.")
         elif not average_30d:
             blockers.append("The prior 30-session average volume must be positive.")
         if prior_close is None:
@@ -338,25 +342,22 @@ must never make a fresh trade or quote change the completed-bar setup score.
             blockers.append("The regular-session opening minute is missing; session VWAP and volume may be incomplete.")
         if not contiguous:
             blockers.append("Twenty-one contiguous completed regular-session minutes are required.")
-        if minute_rvol is None:
-            blockers.append("A positive preceding 20-minute volume baseline is required.")
-        elif minute_rvol < config["min_relative_volume"]:
-            blockers.append("Minute relative volume is below the configured threshold.")
-        if session_volume is None or session_volume < config["min_session_volume"]:
-            blockers.append("Completed regular-session volume is below the configured minimum or unavailable.")
+        # The volume minimum counts regular-session trading only; premarket volume is excluded.
+        # Summing the minute bars present is a lower bound, so a gap cannot let a symbol pass falsely.
+        regular_volume = math.fsum(bar["volume"] for bar in minutes) if minutes else None
+        if regular_volume is None or regular_volume < config["min_session_volume"]:
+            blockers.append("Regular-session volume is below the configured minimum or unavailable; premarket volume is excluded.")
         if price is None or not config["min_price"] <= price <= config["max_price"]:
             blockers.append("Latest price is outside the configured range or unavailable.")
         if technical_close is None or not config["min_price"] <= technical_close <= config["max_price"]:
             blockers.append("Completed minute close is outside the configured price range or unavailable.")
-        if spread is None or spread > config["max_spread_pct"]:
-            blockers.append("Bid/ask spread is unavailable or exceeds the configured maximum.")
         if vwap is None:
             blockers.append("Session VWAP requires actual VWAP values for every positive-volume minute.")
         above_vwap = vwap is not None and technical_close is not None and technical_close > vwap
         ema_trend = ema9 is not None and ema20 is not None and ema9 > ema20
         rising = len(ema9_series) >= 2 and ema9_series[-2] is not None and ema9 > ema9_series[-2]
         rsi_ok = rsi is not None and 50 <= rsi <= 75
-        volume_ok = minute_rvol is not None and minute_rvol >= config["min_relative_volume"]
+        volume_ok = minute_rvol is not None and minute_rvol >= _PARTICIPATION_RVOL
         breakout = len(minutes) >= 6 and technical_close > max(bar["high"] for bar in minutes[-6:-1])
         positive = technical_change is not None and technical_change > 0
         conditions = [
@@ -364,7 +365,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
             ("EMA trend", ema_trend, 20, "Nine-minute EMA is above the twenty-minute EMA."),
             ("Rising EMA", rising, 10, "Nine-minute EMA rose from the preceding completed minute."),
             ("RSI momentum", rsi_ok, 15, "Fourteen-minute Wilder RSI is between 50 and 75 inclusive."),
-            ("Minute participation", volume_ok, 15, "Latest completed minute volume / preceding twenty-minute average meets the configured minimum."),
+            ("Minute participation", volume_ok, 15, "Latest completed minute volume / preceding twenty-minute average is at least 1.5×."),
             ("Five-minute breakout", breakout, 10, "Completed minute close exceeds the preceding five completed minutes' highs."),
             ("Positive session", positive, 10, "Completed minute close is above the split-adjusted previous-session close."),
         ]
@@ -381,18 +382,14 @@ must never make a fresh trade or quote change the completed-bar setup score.
         eligible = not blockers
         signal = "Strong buy" if eligible and score >= config["strong_buy_score"] else "Buy" if eligible and score >= config["buy_score"] else "Watch"
         checks = [
-            {"name": "Minute RVOL", "actual": minute_rvol, "required": config["min_relative_volume"], "passed": volume_ok, "unit": "×"},
-            {"name": "Session volume", "actual": session_volume, "required": config["min_session_volume"], "passed": session_volume is not None and session_volume >= config["min_session_volume"], "unit": "shares"},
-            {"name": "Spread maximum", "actual": spread, "required": config["max_spread_pct"], "passed": spread is not None and spread <= config["max_spread_pct"], "unit": "%"},
+            {"name": "Session volume", "actual": regular_volume, "required": config["min_session_volume"], "passed": regular_volume is not None and regular_volume >= config["min_session_volume"], "unit": "shares"},
             {"name": "Buy score", "actual": score, "required": config["buy_score"], "passed": score >= config["buy_score"], "unit": "points"},
         ]
         # The same complete-bar calculations power the chart and score. VWAP
         # becomes unavailable at a missing minute or missing positive VWAP.
         chart, cumulative_volume, cumulative_value = [], 0, 0
         chart_coverage = has_opening and not invalid_minutes
-        prior_chart_time = None
         for index, bar in enumerate(minutes):
-            chart_coverage = chart_coverage and (prior_chart_time is None or bar["t"] - prior_chart_time == _MINUTE)
             if bar["volume"] > 0:
                 chart_coverage = chart_coverage and bar["vwap"] is not None
                 cumulative_volume += bar["volume"]
@@ -402,13 +399,18 @@ must never make a fresh trade or quote change the completed-bar setup score.
                           "vwap": cumulative_value / cumulative_volume if chart_coverage and cumulative_volume else None,
                           "ema9": ema9_series[index] if ema9_series else None,
                           "ema20": ema20_series[index] if ema20_series else None})
-            prior_chart_time = bar["t"]
         rows.append({
             "symbol": symbol, "name": asset.get("name") or symbol,
             "source": source, "feed": feed, "price": price, "price_at": _iso(price_at),
+            "decision_at": _iso(now),
+            "planning_quote": capture_planning_quote(quote, source, feed),
             "quote_at": _iso(quote_at) if valid_quote else None,
             "volume_at": _iso(volume_at), "session_date": str(session_date) if session_date else None,
             "day_volume": day_volume, "day_volume_at": _iso(day_volume_at),
+            "day_volume_fresh": day_volume_fresh, "day_volume_basis": day_volume_basis, "volume_filter_basis": "regular_session", "day_volume_partial": not valid_daily_volume and day_volume is not None,
+            "day_relative_volume": day_relative_volume, "spread_fresh": bool(fresh_quote),
+            "spread": quote["ap"] - quote["bp"] if valid_quote else None,
+            **screening,
             "session_volume": session_volume, "volume_30d_total": total_30d,
             "avg_volume_30d": average_30d, "relative_volume": relative_volume,
             "minute_relative_volume": minute_rvol, "float_shares": shares,
@@ -430,6 +432,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
             "volume_history": [{"date": bar["date"], "volume": bar["volume"]} for bar in history],
             "signals": signals,
         })
+    rank_rows(rows)
     return rows
 
 
@@ -447,7 +450,7 @@ def demo_bundle(symbols, step=0):
     session_close = session_open + timedelta(hours=6, minutes=30)
     now = session_open + timedelta(minutes=40 + step, seconds=10)
     dates, cursor = [], session_date - timedelta(days=1)
-    while len(dates) < 35:
+    while len(dates) < 280:
         if cursor.weekday() < 5 and cursor != date(2025, 4, 18):
             dates.append(cursor)
         cursor -= timedelta(days=1)
@@ -458,10 +461,11 @@ def demo_bundle(symbols, step=0):
         prior_close = base * 0.98
         daily = []
         for index, day in enumerate(dates):
-            close = prior_close * (1 - (34 - index) * 0.0006)
+            offset = index - (len(dates) - 35)
+            close = prior_close * (1 - (34 - offset) * 0.0006)
             daily.append({"date": day.isoformat(), "open": close * 0.995,
                           "high": close * 1.025, "low": close * 0.975,
-                          "close": close, "volume": 900000 + index * 5000 + asset_index * 10000})
+                          "close": close, "volume": max(100000, 900000 + offset * 5000 + asset_index * 10000)})
         minutes, previous_close = [], base
         for index in range(min(390, 40 + step)):
             close = base + index * 0.0008 + 0.0003 * math.sin(index * 0.7)
@@ -482,7 +486,9 @@ def demo_bundle(symbols, step=0):
                        "sector": "Synthetic", "exchange": "SIMULATED", "bars": daily,
                        "minutes": minutes,
                        "snapshot": {"latestTrade": {"t": _iso(now - timedelta(seconds=1)), "p": latest["close"], "s": 100},
-                                    "latestQuote": {"t": _iso(now - timedelta(seconds=1)), "bp": latest["close"] - 0.001, "ap": latest["close"] + 0.001},
+                                    "latestQuote": {"t": _iso(now - timedelta(seconds=1)),
+                                                    "bp": latest["close"] - 0.001, "ap": latest["close"] + 0.001,
+                                                    "bs": 10000, "as": 10000, "_received_at": _iso(now)},
                                     "dailyBar": {"t": _iso(session_open), "o": minutes[0]["open"],
                                                  "h": max(bar["high"] for bar in minutes),
                                                  "l": min(bar["low"] for bar in minutes),
@@ -490,7 +496,14 @@ def demo_bundle(symbols, step=0):
                                     "_daily_received_at": _iso(now),
                                     "prevDailyBar": {"c": prior_close}},
                        "float": {"shares": 8500000 + asset_index * 1000000, "as_of": "2025-05-13", "source": "Synthetic"}})
+    benchmark_bars = []
+    for index, day in enumerate(dates):
+        close = 400 + index *0.2 + math.sin(index *0.3) *2
+        benchmark_bars.append({"date": day.isoformat(), "open": close *0.999,
+                               "high": close *1.005, "low": close *0.995,
+                               "close": close, "volume": 50000000 + index *10000})
     return {"source": "demo", "feed": "synthetic", "as_of": _iso(now),
+            "benchmark_bars": benchmark_bars,
             "warnings": ["Synthetic historical simulation: one market minute advances every three seconds. No real securities or prices are represented."],
             "session": {"date": session_date.isoformat(), "open": _iso(session_open),
                         "close": _iso(session_close), "previous_date": "2025-05-13",

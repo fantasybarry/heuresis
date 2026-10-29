@@ -7,11 +7,12 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
-from nomisma.server import Application, BusyError, csv_export, default_settings, make_handler, validate_settings
+from nomisma.server import (Application, BusyError, csv_export, default_settings, make_handler, validate_settings,
+                            default_discovery_settings, default_discovery_state, validate_discovery_settings)
 from nomisma.storage import Store
 
 
@@ -119,15 +120,16 @@ class ApplicationTests(unittest.TestCase):
         self.assertIsNone(status["latest"])
         self.assertEqual(status["history"][0]["id"], scan["id"])
 
+    @patch("nomisma.instruments.stock_symbols", new=lambda: {"AAPL", "MSFT"})
     def test_custom_universe_applies_to_imported_data(self):
-        dataset = {"assets": [{"symbol": "AAPL"}, {"symbol": "MSFT"}], "warnings": [], "source": "csv"}
+        dataset = {"assets": [{"symbol": "AAPL"}, {"symbol": "MSFT"}, {"symbol": "MSTZ"}], "warnings": [], "source": "csv"}
         self.app.store.set("csv_dataset", dataset)
-        settings = validate_settings({"source": "csv", "universe": "custom", "symbols": ["AAPL", "XYZ"]})
+        settings = validate_settings({"source": "csv", "universe": "custom", "symbols": ["AAPL", "XYZ", "MSTZ"]})
         with patch("nomisma.server.screen", return_value={"results": []}) as screen_mock:
             self.app.run_scan(settings)
         actual = screen_mock.call_args[0][0]
         self.assertEqual([a["symbol"] for a in actual["assets"]], ["AAPL"])
-        self.assertIn("XYZ", actual["warnings"][0])
+        self.assertIn("XYZ", " ".join(actual["warnings"]))
 
     def test_csv_export_escapes_formulas_and_records_provenance(self):
         scan = {"source": "demo", "feed": "synthetic", "results": [{"symbol": "AAPL", "name": "=HYPERLINK(\"bad\")", "metrics": {}, "change_pct": -1.5}]}
@@ -202,6 +204,183 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(result["result"], {"source": "demo", "rows": []})
 
 
+class DiscoveryScheduleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.app = Application(self.temp.name, seed=False)
+        self.now = datetime(2026, 9, 8, 13, 15, tzinfo=timezone.utc)
+
+    def enable(self):
+        return self.app.save_discovery_settings({"schedule": {"enabled": True}})
+
+    def start_due(self):
+        with patch("nomisma.server.threading.Thread.start"):
+            self.app.scheduler_tick(self.now)
+        return next(iter(self.app.research_jobs.values()))
+
+    def finish(self, job, error=None):
+        with patch("nomisma.server.datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now
+            self.app._finish_research(job, result=None if error else {"source": "demo", "rows": []}, error=error)
+
+    def test_default_and_partial_settings_persist_without_activating(self):
+        original = self.app.discovery_snapshot(self.now)
+        self.assertEqual(original["config"], default_discovery_settings()["config"])
+        self.assertEqual(original["schedule"]["time"], "09:15")
+        self.assertIsNone(original["status"]["next_due"])
+        self.app.save_discovery_settings({"config": {"universe": "custom", "symbols": "AAPL, MSFT", "min_price": 2}})
+        self.app.save_discovery_settings({"config": {"max_price": 15}, "schedule": {"time": "09:20"}})
+        another = Application(self.temp.name, seed=False)
+        saved = another.discovery_settings()
+        self.assertFalse(saved["schedule"]["enabled"])
+        self.assertEqual(saved["schedule"]["time"], "09:20")
+        self.assertEqual(saved["config"]["symbols"], ["AAPL", "MSFT"])
+        self.assertEqual(saved["config"]["min_price"], 2)
+        self.assertEqual(saved["config"]["max_price"], 15)
+        for payload in ({"config": []}, {"config": {"limit": True}}, {"schedule": {"enabled": "false"}},
+                        {"schedule": {"time": "25:00"}}, {"schedule": {"timezone": "UTC"}},
+                        {"schedule": {"extra": 1}}, {"extra": 1}, {"config": {"source": "demo", "universe": "all"}}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                validate_discovery_settings(payload)
+        with patch("nomisma.server.provider_status", return_value={"alpaca_configured": False}), self.assertRaisesRegex(ValueError, "not connected"):
+            self.app.save_discovery_settings({"config": {"source": "alpaca"}, "schedule": {"enabled": True}})
+        self.assertEqual(self.app.discovery_settings(), saved)
+
+    def test_weekday_time_dst_and_late_open_catch_up(self):
+        self.enable()
+        for now, expected in ((datetime(2026, 9, 8, 13, 14, tzinfo=timezone.utc), None),
+                              (self.now, "2026-09-08"),
+                              (datetime(2026, 9, 8, 22, tzinfo=timezone.utc), "2026-09-08"),
+                              (datetime(2026, 9, 12, 14, tzinfo=timezone.utc), None),
+                              (datetime(2026, 12, 8, 14, 14, tzinfo=timezone.utc), None),
+                              (datetime(2026, 12, 8, 14, 15, tzinfo=timezone.utc), "2026-12-08")):
+            with self.subTest(now=now):
+                self.assertEqual(self.app.discovery_due(now), expected)
+        friday = datetime(2026, 10, 30, 15, tzinfo=timezone.utc)
+        self.app.store.set("discovery_state", dict(default_discovery_state(), last_success_date="2026-10-30"))
+        next_due = self.app.discovery_snapshot(friday)["status"]["next_due"]
+        self.assertEqual(datetime.fromisoformat(next_due).astimezone(timezone.utc),
+                         datetime(2026, 11, 2, 14, 15, tzinfo=timezone.utc))
+
+    def test_scheduler_waits_for_busy_research_and_starts_only_once(self):
+        self.enable()
+        self.app.research_jobs = {"diagnostic": {"kind": "diagnostics", "running": True}}
+        self.app.scheduler_tick(self.now)
+        self.assertEqual(len(self.app.research_jobs), 1)
+        self.assertIn("Waiting", self.app.discovery_snapshot(self.now)["status"]["message"])
+        self.app.research_jobs = {}
+        with patch.object(self.app.monitor, "start") as monitor_start, patch.object(self.app.monitor, "save_config") as save_config:
+            job = self.start_due()
+            self.assertEqual(job["scheduled_date"], "2026-09-08")
+            self.app.scheduler_tick(self.now)
+            self.assertEqual(len(self.app.research_jobs), 1)
+            self.assertTrue(self.app.discovery_snapshot(self.now)["status"]["running"])
+            self.finish(job)
+            self.app.scheduler_tick(self.now)
+            self.assertEqual(len(self.app.research_jobs), 1)
+            monitor_start.assert_not_called()
+            save_config.assert_not_called()
+        self.assertIsNone(self.app.store.get("schedule_last_success"))
+        self.assertEqual(self.app.discovery_snapshot(self.now)["status"]["last_success_date"], "2026-09-08")
+        another = Application(self.temp.name, seed=False)
+        self.assertIsNone(another.discovery_due(self.now))
+        self.assertEqual(another.discovery_snapshot(self.now)["latest"]["id"], job["id"])
+
+    def test_failed_search_keeps_last_result_and_retries_after_backoff(self):
+        self.enable()
+        old_job = {"id": "old", "kind": "discovery", "running": False, "result": {"rows": [{"symbol": "KEEP"}]}}
+        self.app.store.set("discovery_state", dict(default_discovery_state(), latest=old_job))
+        job = self.start_due()
+        with patch("nomisma.server.datetime", wraps=datetime) as clock, \
+                patch("nomisma.research.discover", side_effect=ValueError("Provider unavailable")):
+            clock.now.return_value = self.now
+            self.app._research_worker(job, self.app.discovery_settings()["config"])
+        snapshot = self.app.discovery_snapshot(self.now)
+        self.assertEqual(snapshot["latest"]["id"], "old")
+        self.assertEqual(snapshot["status"]["last_run"]["error"], "Provider unavailable")
+        self.assertEqual(snapshot["status"]["retry_after"], "2026-09-08T13:30:00+00:00")
+        self.assertIsNone(self.app.discovery_due(datetime(2026, 9, 8, 13, 29, tzinfo=timezone.utc)))
+        self.assertEqual(self.app.discovery_due(datetime(2026, 9, 8, 13, 30, tzinfo=timezone.utc)), "2026-09-08")
+        self.now = datetime(2026, 9, 8, 13, 30, tzinfo=timezone.utc)
+        with patch("nomisma.server.threading.Thread.start"):
+            self.app.scheduler_tick(self.now)
+        next_job = list(self.app.research_jobs.values())[-1]
+        self.assertNotEqual(next_job["id"], job["id"])
+        self.finish(next_job)
+        self.assertIsNone(self.app.discovery_snapshot(self.now)["status"]["retry_after"])
+
+    def test_restart_recovers_interrupted_schedule_without_losing_results(self):
+        self.enable()
+        saved = {"id": "previous", "kind": "discovery", "running": False, "result": {"rows": []}}
+        self.app.store.set("discovery_state", dict(default_discovery_state(), latest=saved))
+        job = self.start_due()
+        another = Application(self.temp.name, seed=False)
+        status = another.discovery_snapshot(self.now)["status"]
+        self.assertFalse(status["running"])
+        self.assertFalse(status["last_run"]["running"])
+        self.assertEqual(status["last_run"]["id"], job["id"])
+        self.assertIn("interrupted", status["last_run"]["message"])
+        self.assertEqual(another.discovery_due(self.now), "2026-09-08")
+        self.assertEqual(another.discovery_snapshot(self.now)["latest"], saved)
+
+    def test_discovery_persistence_failure_does_not_leave_running_job(self):
+        self.enable()
+        job = self.start_due()
+        with patch.object(self.app.store, "set", side_effect=OSError("disk full")):
+            self.finish(job)
+        self.assertFalse(job["running"])
+        self.assertIn("could not save", job["error"])
+        self.assertIsNone(self.app.discovery_snapshot(self.now)["latest"])
+
+    def test_search_repeats_every_30_minutes_until_close_and_replaces_radar(self):
+        self.enable()
+        job = self.start_due()
+        with patch("nomisma.server.datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now
+            self.app._finish_research(job, result={"source": "demo", "rows": [{"symbol": "BBB"}, {"symbol": "AAA"}]})
+        self.assertEqual(self.app.monitor.config["symbols"], ["BBB", "AAA"])
+        self.assertIsNone(self.app.discovery_due(self.now + timedelta(minutes=29)))
+        self.assertEqual(self.app.discovery_due(self.now + timedelta(minutes=30)), "2026-09-08")
+        state = self.app.store.get("discovery_state")
+        state["last_success_at"] = datetime(2026, 9, 8, 19, 45, tzinfo=timezone.utc).isoformat()  # 3:45 p.m. New York
+        self.app.store.set("discovery_state", state)
+        self.assertIsNone(self.app.discovery_due(datetime(2026, 9, 8, 20, 30, tzinfo=timezone.utc)))
+        self.app.monitor.status["running"] = True
+        with patch.object(self.app.monitor, "stop") as stop, patch.object(self.app.monitor, "start") as start:
+            self.app._update_radar({"source": "demo", "rows": [{"symbol": "CCC"}]})
+            self.app._update_radar({"source": "demo", "rows": []})
+        stop.assert_called_once()
+        start.assert_called_once_with({"source": "demo", "symbols": ["CCC"]})
+
+    def test_empty_search_on_a_new_day_pauses_the_radar_until_stocks_qualify(self):
+        self.app.monitor.status["running"] = True
+        self.app.radar_date = "2026-09-07"
+        with patch.object(self.app.monitor, "stop") as stop, patch.object(self.app.monitor, "start") as start:
+            self.app._update_radar({"source": "demo", "session_date": "2026-09-08", "rows": []})
+            stop.assert_called_once()
+            self.assertTrue(self.app.radar_paused)
+            self.app.monitor.status["running"] = False
+            self.app._update_radar({"source": "demo", "session_date": "2026-09-08", "rows": [{"symbol": "DDD"}]})
+            start.assert_called_once_with({"source": "demo", "symbols": ["DDD"]})
+            self.app.monitor.status["running"] = True
+            self.app._update_radar({"source": "demo", "session_date": "2026-09-08", "rows": []})
+        self.assertEqual(stop.call_count, 2)  # one more from the resume; today's radar survives the empty search
+        self.assertFalse(self.app.radar_paused)
+
+    def test_manual_discovery_persists_config_but_does_not_consume_schedule(self):
+        self.enable()
+        self.app.store.set("schedule_last_success", "2026-09-08")
+        with patch("nomisma.server.threading.Thread.start"):
+            initial = self.app.start_research("discovery", {"min_price": 5})
+        job = self.app.research_jobs[initial["id"]]
+        self.finish(job)
+        self.assertEqual(self.app.discovery_settings()["config"]["min_price"], 5)
+        self.assertEqual(self.app.discovery_due(self.now), "2026-09-08")
+        self.assertEqual(self.app.store.get("schedule_last_success"), "2026-09-08")
+        self.assertEqual(self.app.discovery_snapshot(self.now)["latest"]["id"], job["id"])
+
+
 class HTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -252,6 +431,20 @@ class HTTPTests(unittest.TestCase):
             for query in ("limit=0", "limit=101", "offset=-1", "offset=abc"):
                 self.assertEqual(self.request(route + "?" + query)[0], 400)
 
+    def test_alert_ack_route_validates_explicit_source_and_passes_valid_scope(self):
+        with patch.object(self.app.store, "acknowledge_monitor_alerts", return_value=[]) as acknowledge:
+            for source in ("csv", "all", "ALPACA", "", None, [], {}, True):
+                with self.subTest(source=source):
+                    status, body, _ = self.request("/api/monitor/alerts/ack", {"all": True, "source": source})
+                    self.assertEqual(status, 400)
+                    self.assertIn("source", body["error"])
+            acknowledge.assert_not_called()
+            for source in ("demo", "alpaca"):
+                self.assertEqual(self.request("/api/monitor/alerts/ack", {"all": True, "source": source})[0], 200)
+                acknowledge.assert_called_with(None, True, source=source)
+            self.assertEqual(self.request("/api/monitor/alerts/ack", {"all": True})[0], 200)
+            acknowledge.assert_called_with(None, True, source=None)
+
     def test_research_routes_dispatch_and_poll(self):
         job = {"id": "sample", "kind": "discovery", "running": True, "message": "Searching", "error": None, "result": None}
         with patch.object(self.app, "start_research", return_value=job) as dispatch:
@@ -263,6 +456,45 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(self.request("/api/research/jobs/sample")[1]["job"], job)
         self.assertEqual(self.request("/api/research/jobs/missing")[0], 404)
         self.assertEqual(self.request("/api/monitor/alerts/missing")[0], 404)
+
+    def test_discovery_settings_and_latest_routes(self):
+        original = self.app.discovery_settings()
+        try:
+            status, body, _ = self.request("/api/discovery/settings", {"config": {"min_day_volume": 12345},
+                                                                       "schedule": {"time": "09:45"}})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["config"]["min_day_volume"], 12345)
+            self.assertEqual(body["schedule"]["time"], "09:45")
+            self.assertIn("next_due", body["status"])
+            self.assertEqual(self.request("/api/discovery/settings")[1]["config"]["min_day_volume"], 12345)
+            self.assertIn("job", self.request("/api/discovery/latest")[1])
+            self.assertEqual(self.request("/api/discovery/settings", {"schedule": {"time": "invalid"}})[0], 400)
+        finally:
+            self.app.store.set("discovery_settings", original)
+
+    def test_compact_monitor_and_row_detail_are_explicit(self):
+        with patch.object(self.app.monitor, "snapshot", return_value={"rows": [], "compact": True}) as snapshot:
+            self.assertEqual(self.request("/api/monitor?compact=1")[0], 200)
+            snapshot.assert_called_once_with(compact=True)
+            snapshot.reset_mock()
+            self.assertEqual(self.request("/api/monitor")[0], 200)
+            snapshot.assert_called_once_with()
+        with patch.object(self.app.monitor, "row_detail", return_value={"symbol": "AAPL", "chart": []}) as detail:
+            self.assertEqual(self.request("/api/monitor/symbol/AAPL")[1]["row"]["symbol"], "AAPL")
+            detail.assert_called_once_with("AAPL")
+        with patch.object(self.app.monitor, "row_detail", return_value=None):
+            self.assertEqual(self.request("/api/monitor/symbol/MISSING")[0], 404)
+        self.assertEqual(self.request("/api/monitor/symbol/bad/symbol")[0], 400)
+
+    def test_monitor_refresh_dispatch_and_diagnostic_guard(self):
+        with patch.object(self.app.monitor, "refresh", return_value={"status": {"refresh": {"state": "loading"}}}) as refresh:
+            status, body, _ = self.request("/api/monitor/refresh", {})
+            self.assertEqual(status, 202)
+            self.assertEqual(body["status"]["refresh"]["state"], "loading")
+            refresh.assert_called_once_with()
+            with patch.object(self.app, "research_jobs", {"busy": {"kind": "diagnostics", "running": True}}):
+                self.assertEqual(self.request("/api/monitor/refresh", {})[0], 409)
+            self.assertEqual(refresh.call_count, 1)
 
     def test_backup_download_and_restore_require_local_origin(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)

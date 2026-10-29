@@ -1,0 +1,215 @@
+{
+  "node_count": 2087,
+  "unverified_node_count": 0,
+  "raw_edge_count": 5640,
+  "non_object_edges": 0,
+  "missing_endpoint_edges": 0,
+  "dangling_endpoint_edges": 522,
+  "external_reference_edges": 5,
+  "self_loop_edges": 22,
+  "valid_candidate_edges": 5113,
+  "exact_duplicate_edges": 0,
+  "directed_unique_endpoint_pairs": 4939,
+  "directed_same_endpoint_collapsed_edges": 174,
+  "undirected_unique_endpoint_pairs": 4934,
+  "undirected_same_endpoint_collapsed_edges": 179,
+  "same_endpoint_group_count": 149,
+  "relation_variant_groups": 108,
+  "source_file_variant_groups": 0,
+  "source_location_variant_groups": 27,
+  "context_variant_groups": 16,
+  "post_build_graph_type": "Graph",
+  "post_build_node_count": 2158,
+  "post_build_edge_count": 5449,
+  "post_build_error": "",
+  "producer_suppression": {
+    "path": "/Users/barry/.local/share/uv/tools/graphifyy/lib/python3.10/site-packages/graphify/extract.py",
+    "total_sites": 12,
+    "sites": [
+      {
+        "line": 1341,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids = {n[\"id\"] for n in nodes}"
+      },
+      {
+        "line": 1874,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids = {n[\"id\"] for n in nodes}"
+      },
+      {
+        "line": 1876,
+        "name": "seen_doc_refs",
+        "tuple_arity": 0,
+        "sample": "seen_doc_refs: set[str] = set()"
+      },
+      {
+        "line": 2246,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = {n[\"id\"] for n in nodes}"
+      },
+      {
+        "line": 2393,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids = {n.get(\"id\") for n in nodes}"
+      },
+      {
+        "line": 3113,
+        "name": "seen_keys",
+        "tuple_arity": 0,
+        "sample": "seen_keys: set[tuple] = set()"
+      },
+      {
+        "line": 3282,
+        "name": "seen_keys",
+        "tuple_arity": 0,
+        "sample": "seen_keys: set[tuple] = set()"
+      },
+      {
+        "line": 5338,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 5446,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 5525,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 6040,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 6041,
+        "name": "seen_edges",
+        "tuple_arity": 4,
+        "sample": "seen_edges: set[tuple[str, str, str, str | None]] = set()"
+      }
+    ],
+    "error": ""
+  },
+  "examples": [
+    {
+      "source": "nomisma_desktop_app_appdelegate",
+      "target": "nomisma_desktop_app_appdelegate_webview",
+      "edge_count": 9,
+      "relations": [
+        "method"
+      ],
+      "source_files": [
+        "nomisma/desktop/App.swift"
+      ],
+      "source_locations": [
+        "L441",
+        "L460",
+        "L470",
+        "L481",
+        "L487",
+        "L497",
+        "L506",
+        "L517",
+        "L518"
+      ],
+      "contexts": [
+        ""
+      ]
+    },
+    {
+      "source": "nomisma_desktop_app_appdelegate_webview",
+      "target": "wkwebview",
+      "edge_count": 9,
+      "relations": [
+        "references"
+      ],
+      "source_files": [
+        "nomisma/desktop/App.swift"
+      ],
+      "source_locations": [
+        "L441",
+        "L460",
+        "L470",
+        "L481",
+        "L487",
+        "L497",
+        "L506",
+        "L517",
+        "L518"
+      ],
+      "contexts": [
+        "parameter_type"
+      ]
+    },
+    {
+      "source": "nomisma_desktop_app_appdelegate_webview",
+      "target": "void",
+      "edge_count": 5,
+      "relations": [
+        "references"
+      ],
+      "source_files": [
+        "nomisma/desktop/App.swift"
+      ],
+      "source_locations": [
+        "L441",
+        "L460",
+        "L487",
+        "L497",
+        "L506"
+      ],
+      "contexts": [
+        "parameter_type"
+      ]
+    },
+    {
+      "source": "nomisma_desktop_app_appdelegate",
+      "target": "url",
+      "edge_count": 3,
+      "relations": [
+        "references"
+      ],
+      "source_files": [
+        "nomisma/desktop/App.swift"
+      ],
+      "source_locations": [
+        "L32",
+        "L33",
+        "L34"
+      ],
+      "contexts": [
+        "field"
+      ]
+    },
+    {
+      "source": "nomisma_desktop_app_downloaddestination",
+      "target": "url",
+      "edge_count": 3,
+      "relations": [
+        "references"
+      ],
+      "source_files": [
+        "nomisma/desktop/App.swift"
+      ],
+      "source_locations": [
+        "L40",
+        "L41",
+        "L42"
+      ],
+      "contexts": [
+        "field"
+      ]
+    }
+  ]
+}

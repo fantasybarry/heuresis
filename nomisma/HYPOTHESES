@@ -1,0 +1,51 @@
+Second discovery study: pre-registered entry hypotheses
+Committed October 21, 2026, before any H1 or H2 result was computed. Post hoc
+relative to the first study (DISCOVERY_STUDY_SPEC.md, "Loss follow-up").
+
+Cohort (both hypotheses)
+- Arm c, primary window, liquid (signal-minute dollar volume >= $20,000),
+  opening gap >= 20%, premarket dollar volume >= $1M, defined stop.
+- Source: replay-v2-YYYY-MM.csv.gz, October 2025-September 2026, rebuilt with
+  the corrected replay (suspected halt >= 5 missing minutes, 2% limit, next-print
+  deadline exit, missing minutes extend a streak at/below resistance).
+- Gap >= 40% is reported as a subgroup only.
+
+H1 - pullback and reclaim
+Within the 15-minute window after the signal minute:
+1. Pullback: the first one-minute close at/below resistance. None: no trade.
+2. Skip if the pullback candle's upper wick is >= 0.5 of its range.
+3. Reclaim: the first later close above resistance. If more than two
+   consecutive minutes close at/below resistance first (missing minutes count),
+   or the window ends, no trade.
+4. Entry at the next bar's open, with the suspected-halt and 2% limit rules
+   (limit relative to the reclaim close).
+5. Stop: one tick below the lowest low from the pullback through the reclaim.
+6. Target: the highest high from the signal minute up to the pullback.
+   An entry at/above the target is no trade.
+7. Backstop: time exit 15 minutes after entry.
+8. Stop and target in the same minute: the stop fills first.
+Cost: 0.5% one-way on both sides.
+
+H2 - cheaper to trade
+- The cohort's immediate breakout trade unchanged (1.5 x ATR14 stop, 15-minute
+  hold), restricted to signal close >= $2 and signal-minute dollar volume
+  >= $100,000.
+- Cost: measured Alpaca SIP half-spread at entry and exit. Delisted or
+  quote-less opportunities use 0.5% one-way and are counted.
+- Also reported at 0.5% one-way.
+
+Pass (each hypothesis, on October 2025-September 2026)
+- Session-bootstrap lower 90% bound of mean net percent per trade above zero.
+- At least 8 of 12 months with positive mean net.
+- Mean net positive without the single best trade.
+- Generality: positive mean net in each side of price < $2 / >= $2 (not
+  applicable to H2) and signal 9:30-10:00 / 10:00-11:00, and in each calendar
+  quarter, with no quarter supplying more than half of the total net.
+- Also reported at 1% and 2% one-way; these do not decide the pass.
+
+Confirmation
+- A passing hypothesis is frozen and confirmed only on its first 100 forward
+  opportunities from October 2026 onward, under the same pass rules except
+  the month and quarter conditions. Confirmed hypotheses become finalist
+  candidates for the sealed April-September 2025 holdout.
+- A failing hypothesis is recorded as failed and not revised on this data.
