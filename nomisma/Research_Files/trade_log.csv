@@ -1,0 +1,2 @@
+date,symbol,entry_time_et,entry_price,exit_time_et,exit_price,shares,position_usd,capital_before,position_pct,pnl_usd,return_pct,account_return_pct,capital_after,triggering_alert,alert_signal_minute_et,alert_sent_et,alert_price,alert_score,entry_delay_min,entry_vs_alert_pct,radar_since_et,notes
+2026-10-29,BURU,10:09,0.2549,10:30,0.2959,4000,1019.60,1650.00,61.8,164.00,16.08,9.94,1814.00,Strong buy (assumed),10:06,10:07:00,0.2492,100,2,2.29,09:37,First and only BURU alert; on radar ~30 min before it fired. Replay rule: entry 0.2492 10:07 then +10% target hit 10:19 (+10.0%)
