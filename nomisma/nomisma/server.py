@@ -347,9 +347,13 @@ class Application:
             except Exception as exc:
                 completed.update(message="Needs attention", error="Discovery finished but could not save its result. Check available disk space and retry.")
                 LOGGER.warning("Could not save research state (%s)", type(exc).__name__)
-            job.update(completed)
-        if job["kind"] == "discovery" and error is None and result:
-            self._update_radar(result)
+        # Update the radar before advertising completion, so a client that sees the job finish reads the new symbols.
+        try:
+            if job["kind"] == "discovery" and error is None and result:
+                self._update_radar(result)
+        finally:
+            with self.lock:
+                job.update(completed)
 
     def _update_radar(self, result):
         """Replace the radar's symbols with the search's top results; an active monitor restarts on them."""

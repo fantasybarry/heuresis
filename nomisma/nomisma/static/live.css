@@ -17,6 +17,7 @@
 .live-command-actions { display:flex; align-items:center; gap:9px; flex-shrink:0; }
 .live-alert-panel .live-panel-heading { flex-wrap:wrap; }
 .live-alert-actions { display:flex; align-items:center; gap:14px; }
+.live-radar-actions { display:flex; align-items:center; gap:9px; flex-shrink:0; }
 .live-alert-refresh-status { padding:0 20px 14px; color:#687568; font-size:11px; line-height:1.6; }
 .live-source-banner { display:flex; align-items:center; gap:13px; margin-top:12px; padding:14px 18px; background:#edf3e9; border:1px solid #dfe8d8; border-radius:10px; }
 .live-source-banner.synthetic,.live-report-source.synthetic { background:#f5f0e3; border-color:#e8dfc9; }
@@ -59,6 +60,10 @@
 .live-stocks td strong { display:block; font-weight:550; font-size:14px; }
 .live-stocks td small { display:block; margin-top:5px; font-size:10px; }
 .live-stock-button { padding:0; background:none; display:flex; align-items:flex-start; flex-direction:column; gap:8px; text-align:left; }
+.live-stock-button,.live-candle-open { display:inline-flex; vertical-align:top; }
+.live-candle-open { margin-left:10px; padding:3px; border:0; border-radius:6px; background:none; color:#9aab8c; cursor:pointer; }
+.live-candle-open:hover,.live-candle-open:focus-visible { color:#39704b; background:#edf3e7; }
+.live-candle-open svg { width:16px; height:16px; }
 .live-symbol { font-weight:650; font-size:15px; display:flex; align-items:center; gap:8px; letter-spacing:.2px; }
 .live-row-dot { width:5px; height:5px; border-radius:50%; background:#74976a; }
 .live-row-dot.stale { background:#b49160; }
@@ -158,7 +163,17 @@
 .live-tf-group .button { padding:4px 11px; min-height:0; font-size:12px; }
 .live-tf-group .button[aria-pressed="true"] { background:#39704b; border-color:#39704b; color:#fff; }
 .live-candle-chart svg { cursor:crosshair; touch-action:pan-y; user-select:none; }
-.live-candle-readout { display:flex; flex-wrap:wrap; gap:4px 12px; min-height:18px; margin-bottom:6px; font-size:12px; color:#536747; font-variant-numeric:tabular-nums; }
+.live-candle-readout { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; min-height:26px; margin-bottom:8px; font-size:12px; color:#7a8a6e; font-variant-numeric:tabular-nums; }
+.live-candle-readout b { font-weight:550; color:#3f5537; }
+.live-readout-time { color:#536747; font-weight:550; }
+.live-readout-price { font-size:20px; font-weight:600; color:#2f4529; letter-spacing:-.3px; }
+.live-readout-change { font-size:13px; font-weight:550; margin-left:-6px; }
+.live-candle-help { display:flex; flex-wrap:wrap; gap:4px 18px; margin-top:6px; }
+.live-candle-full .live-report-section-title { margin-bottom:12px; }
+.live-candle-full .live-report-section-title h3 { font-size:20px; }
+.live-candle-full .live-report-section-title h3 span { font-size:12px; font-weight:400; color:#88967a; margin-left:8px; }
+.live-tf-segment { padding:2px; gap:2px; border:1px solid #dfe7d8; border-radius:8px; background:#f4f7f0; }
+.live-tf-segment .button { border-color:transparent; background:transparent; }
 .live-candle-chart svg:active { cursor:grabbing; }
 .live-candle-nav { display:flex; justify-content:space-between; align-items:center; min-height:24px; font-size:11px; color:#88967a; }
 /* Full-screen chart: the report dialog fills the window and shows only the candle section. */
@@ -169,7 +184,7 @@
 .live-session-key { margin-right:14px; }
 .live-session-key i { display:inline-block; width:10px; height:10px; border:1px solid #d3dccb; border-radius:2px; margin:0 4px 0 10px; vertical-align:-1px; background:#fff; }
 .live-session-key i:first-child { margin-left:0; }
-.live-candle-nav .button { padding:3px 10px; min-height:0; font-size:12px; }
+.live-candle-nav .button { padding:4px 12px; min-height:28px; font-size:13px; }
 .live-chart-times { display:flex; justify-content:space-between; font-size:10px; color:#8a987c; gap:15px; padding:3px 6px 0; }
 .live-volume-chart { height:130px; display:flex; gap:6px; align-items:flex-end; border-bottom:1px solid #dfe8d5; padding:10px 4px 0; }
 .live-volume-bar { flex:1; height:100%; position:relative; min-width:1px; }

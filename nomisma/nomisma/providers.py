@@ -6,6 +6,7 @@ https://docs.alpaca.markets/us/reference/legacycalendar
 https://docs.alpaca.markets/us/reference/get-v2-assets-1
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from datetime import date, datetime, time as daytime, timedelta, timezone
 import io
@@ -24,7 +25,9 @@ from zoneinfo import ZoneInfo
 MAX_CSV_BYTES = 20 * 1024 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_CUSTOM_SYMBOLS = 1000
-BATCH_SIZE = 50
+# About 310 daily bars × 32 symbols fits one 10,000-bar page, so most batches need a single request.
+BATCH_SIZE = 32
+FETCH_WORKERS = 16
 DEMO_AS_OF = "2025-12-31"
 _NY = ZoneInfo("America/New_York")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9]{0,9}(?:[.\-][A-Z0-9]{1,4})?\Z")
@@ -442,8 +445,9 @@ def fetch_alpaca(universe="curated", symbols=None, progress=None):
     # includes the completed daily bar (also on early-close days).
     end = min(end, now - timedelta(minutes=30))
     batches = [all_symbols[index:index + BATCH_SIZE] for index in range(0, len(all_symbols), BATCH_SIZE)]
-    for index, batch in enumerate(batches):
-        report("Fetching daily bars · batch {} of {} ({} symbols)…".format(index + 1, len(batches), len(batch)))
+
+    def fetch_batch(batch):
+        found = {symbol: {} for symbol in batch}
         params = {"symbols": ",".join(batch), "timeframe": "1Day",
                   "start": start.isoformat(), "end": end.isoformat(),
                   "limit": 10000, "adjustment": "split", "feed": feed,
@@ -454,7 +458,7 @@ def fetch_alpaca(universe="curated", symbols=None, progress=None):
             if not isinstance(payload, dict) or not isinstance(payload.get("bars"), dict):
                 raise ProviderError("Alpaca returned an invalid bars response.")
             for symbol, bars in payload["bars"].items():
-                if symbol not in batch or not isinstance(bars, list):
+                if symbol not in found or not isinstance(bars, list):
                     raise ProviderError("Alpaca returned an unexpected symbol or invalid bar collection.")
                 for raw in bars:
                     try:
@@ -471,19 +475,30 @@ def fetch_alpaca(universe="curated", symbols=None, progress=None):
                                                      "volume": raw["v"]}, symbol)
                     except (ValueError, KeyError, TypeError, AttributeError):
                         raise ProviderError("Alpaca returned an invalid daily bar for {}.".format(symbol)) from None
-                    previous = collected[symbol].get(bar["date"])
+                    previous = found[symbol].get(bar["date"])
                     if previous is not None and previous != bar:
                         raise ProviderError("Alpaca returned conflicting daily bars for {} on {}.".format(symbol, bar["date"]))
-                    collected[symbol][bar["date"]] = bar
+                    found[symbol][bar["date"]] = bar
             token = payload.get("next_page_token")
             if token is None or token == "":
-                break
+                return found
             if not isinstance(token, str) or token in seen_tokens or len(token) > 10000:
                 raise ProviderError("Alpaca returned an invalid or repeated pagination token.")
             seen_tokens.add(token)
             params["page_token"] = token
-        else:
-            raise ProviderError("Alpaca pagination exceeded 100 pages for one batch; scan stopped without partial results.")
+        raise ProviderError("Alpaca pagination exceeded 100 pages for one batch; scan stopped without partial results.")
+
+    # Batches download in parallel; a scan stays far below Alpaca's per-minute request limit.
+    report("Fetching daily bars for {:,} symbols · 0 of {} batches…".format(len(all_symbols), len(batches)))
+    executor = ThreadPoolExecutor(max_workers=FETCH_WORKERS, thread_name_prefix="nomisma-bars")
+    try:
+        futures = [executor.submit(fetch_batch, batch) for batch in batches]
+        for done, future in enumerate(as_completed(futures), 1):
+            collected.update(future.result())
+            report("Fetching daily bars for {:,} symbols · {} of {} batches…".format(len(all_symbols), done, len(batches)))
+    finally:
+        # A failed batch stops the scan without waiting for the batches still queued.
+        executor.shutdown(wait=False, cancel_futures=True)
     assets = []
     for symbol in requested:
         asset = dict(metadata.get(symbol) or _asset_metadata(symbol))

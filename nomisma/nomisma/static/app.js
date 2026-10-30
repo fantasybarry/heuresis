@@ -185,7 +185,7 @@ function stockTable(scan, results, {page = 0, history = false} = {}) {
   const start = page * state.pageSize;
   const rows = results.slice(start, start + state.pageSize).map((stock) => {
     const saved = state.watchlist.includes(stock.symbol);
-    return `<tr><td><button class="star-button${saved ? " saved" : ""}" data-watch="${escapeHTML(stock.symbol)}" aria-label="${saved ? "Remove" : "Add"} ${escapeHTML(stock.symbol)} ${saved ? "from" : "to"} watchlist" aria-pressed="${saved}">${icon("star")}</button></td><td><button class="company-button" data-stock="${escapeHTML(stock.symbol)}" data-scan="${escapeHTML(scan.id)}">${avatar(stock.symbol)}<span class="company-copy"><span class="company-symbol">${escapeHTML(stock.symbol)}</span><span class="company-name" title="${escapeHTML(stock.name)}">${escapeHTML(stock.name || stock.sector || "US equity")}</span></span></button></td><td class="num"><div class="price-main">${money(stock.price)}</div><div class="price-change ${changeClass(stock.change_pct)}">${percent(stock.change_pct)}</div></td><td class="trend-column">${sparkline(stock)}</td><td class="num"><div class="score-cell"><span class="score-number">${number(stock.score, 0)}</span><span class="score-track" aria-hidden="true"><span style="width:${Math.max(0, Math.min(100, stock.score || 0))}%"></span></span></div></td><td class="num volume-value">${multiple(stock.metrics?.relative_volume)}</td><td class="num rsi-value">${number(stock.metrics?.rsi, 1)}</td><td><span class="setup-badge">${escapeHTML(stock.setup)}</span></td><td><button class="detail-arrow" data-stock="${escapeHTML(stock.symbol)}" data-scan="${escapeHTML(scan.id)}" aria-label="Open ${escapeHTML(stock.symbol)} details">${icon("chevron-right")}</button></td></tr>`;
+    return `<tr><td><button class="star-button${saved ? " saved" : ""}" data-watch="${escapeHTML(stock.symbol)}" aria-label="${saved ? "Remove" : "Add"} ${escapeHTML(stock.symbol)} ${saved ? "from" : "to"} watchlist" aria-pressed="${saved}">${icon("star")}</button></td><td><button class="company-button" data-stock="${escapeHTML(stock.symbol)}" data-scan="${escapeHTML(scan.id)}">${avatar(stock.symbol)}<span class="company-copy"><span class="company-symbol">${escapeHTML(stock.symbol)}</span><span class="company-name" title="${escapeHTML(stock.name)}">${escapeHTML(stock.name || stock.sector || "US equity")}</span></span></button></td><td class="num"><div class="price-main">${money(stock.price)}</div><div class="price-change ${changeClass(stock.change_pct)}">${percent(stock.change_pct)}</div></td><td class="trend-column">${sparkline(stock)}</td><td class="num"><div class="score-cell"><span class="score-number">${number(stock.score, 0)}</span><span class="score-track" aria-hidden="true"><span style="width:${Math.max(0, Math.min(100, stock.score || 0))}%"></span></span></div></td><td class="num volume-value">${multiple(stock.metrics?.relative_volume)}</td><td class="num rsi-value">${number(stock.metrics?.rsi, 1)}</td><td><span class="setup-badge">${escapeHTML(stock.setup)}</span></td><td class="row-actions"><button class="detail-arrow" data-candles="${escapeHTML(stock.symbol)}" title="Full-screen candles" aria-label="Open ${escapeHTML(stock.symbol)} full-screen candlestick chart">${icon("trend")}</button><button class="detail-arrow" data-stock="${escapeHTML(stock.symbol)}" data-scan="${escapeHTML(scan.id)}" aria-label="Open ${escapeHTML(stock.symbol)} details">${icon("chevron-right")}</button></td></tr>`;
   }).join("");
   return `<table class="stock-table"><thead><tr><th><span class="sr-only">Watchlist</span></th><th>Company</th><th class="num">Price / day</th><th class="trend-column">60D trend</th><th class="num">Score <span title="Technical ranking, not a probability">/100</span></th><th class="num" title="Latest volume divided by prior 20-session average">Rel. vol.</th><th class="num" title="14-session relative strength index">RSI</th><th>Setup</th><th><span class="sr-only">Details</span></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
@@ -259,18 +259,6 @@ function renderWarnings() {
   element.classList.toggle("hidden", !warnings.length || state.view === "live");
   element.innerHTML = warnings.length ? `<details><summary>${icon("info")}<span>${escapeHTML(warnings[0])}${warnings.length > 1 ? ` <span class="warning-count">+${warnings.length - 1} data notes</span>` : ""}</span></summary><ul>${warnings.map((warning) => `<li>${escapeHTML(warning)}</li>`).join("")}</ul></details>` : "";
 }
-function renderWatchlist() {
-  $("#watchlist-count").textContent = state.watchlist.length;
-  const results = state.latest?.results || [];
-  if (!state.watchlist.length) {
-    $("#watchlist-results").innerHTML = emptyState("star", "Keep an eye on what matters", "Save a stock with the star beside its symbol, or add a symbol of your own.", '<button class="button subtle" data-action="add-symbol">Add your first symbol</button>');
-    return;
-  }
-  $("#watchlist-results").innerHTML = `<div class="watchlist-symbols">${state.watchlist.map((symbol) => {
-    const stock = results.find((item) => item.symbol === symbol);
-    return `<article class="watch-card"><div class="watch-card-top"><div class="watch-card-name">${avatar(symbol)}${escapeHTML(symbol)}</div><button class="icon-button" data-watch="${escapeHTML(symbol)}" aria-label="Remove ${escapeHTML(symbol)} from watchlist">${icon("close")}</button></div>${stock ? `<div class="watch-price">${money(stock.price)}<small class="${changeClass(stock.change_pct)}">${percent(stock.change_pct)}</small></div><p>${escapeHTML(stock.name)}<br>Data as of ${dateLabel(stock.as_of)} · ${escapeHTML(sourceName(state.latest.source))}</p><div class="watch-card-foot"><span class="setup-badge">Score ${number(stock.score)} / 100</span><button class="text-button" data-stock="${escapeHTML(symbol)}" data-scan="${escapeHTML(state.latest.id)}">View signals ${icon("arrow-right")}</button></div>` : `<p>No matching result in the latest scan. This symbol may fall outside the scanned universe or your selected filters.</p><div class="watch-card-foot"><span class="source-tag">Saved for research</span><button class="text-button" data-action="settings">Edit universe ${icon("arrow-right")}</button></div>`}</article>`;
-  }).join("")}</div>`;
-}
 async function loadHistory(offset = 0) {
   if (state.historyBusy) return;
   state.historyBusy = true;
@@ -307,15 +295,13 @@ function renderHeader() {
   if (state.view === "live") $("#connection-label").textContent = "Workspace settings";
 }
 function renderAll() {
-  renderHeader(); renderStats(); renderFilterChips(); renderResults(); renderMarket(); renderStrategy(); renderWarnings(); renderWatchlist(); renderHistory();
+  renderHeader(); renderStats(); renderFilterChips(); renderResults(); renderMarket(); renderStrategy(); renderWarnings(); renderHistory();
 }
 function changeView(view, updateHash = true) {
   const metadata = {
     live:["INTRADAY · PENNY-STOCK MOMENTUM", "Catch the move. Know the setup", "Follow price, participation, and momentum as the session unfolds."],
     dashboard:["YOUR DAILY RESEARCH WORKSPACE", "Your market, in focus", "Find strength in the noise. Discover stocks that meet your strategy."],
-    watchlist:["FOLLOW YOUR CONVICTION", "Worth watching", "A considered collection of stocks you want to know better."],
-    history:["YOUR RESEARCH, OVER TIME", "Every scan tells a story", "Revisit your screens and the market conditions behind them."],
-    methodology:["A FRAMEWORK YOU CAN UNDERSTAND", "More than a number", "Understand the signals, their limits, and what goes into every score."]
+    history:["YOUR RESEARCH, OVER TIME", "Every scan tells a story", "Revisit your screens and the market conditions behind them."]
   };
   if (!metadata[view]) view = "live";
   state.view = view;
@@ -604,24 +590,17 @@ async function toggleWatch(symbol, enabled) {
   try {
     const result = await api("/api/watchlist", {symbol, enabled:enabled ?? !state.watchlist.includes(symbol)});
     state.watchlist = result.watchlist;
-    renderWatchlist(); renderResults();
+    renderResults();
     if (state.detail) renderStockWatchButton();
     if (state.historyScan && $("#history-dialog").open) renderHistoryDetail();
     if (focused?.dataset.watch === symbol && !focused.isConnected) {
       const context = $("#history-dialog").open ? $("#history-dialog") : $(`#${state.view}-view`);
       const replacement = $$("[data-watch]", context || document).find((element) => element.dataset.watch === symbol);
-      (replacement || $("#watchlist-add"))?.focus();
+      replacement?.focus();
     }
     toast(`${symbol} ${state.watchlist.includes(symbol) ? "added to" : "removed from"} your watchlist.`);
   } catch (error) { toast(error.message, true); throw error; }
   finally { watchBusy.delete(symbol); }
-}
-function addSymbol() {
-  openTextDialog({title:"Add to your watchlist", description:"Keep a symbol close for your next round of research.", label:"Stock symbol", placeholder:"e.g. AAPL", submit:"Add symbol", maxLength:15, onSubmit:async (input) => {
-    const symbol = input.toUpperCase();
-    if (!/^[A-Z0-9][A-Z0-9.\/-]{0,14}$/.test(symbol)) throw new Error("Enter one valid stock symbol, such as AAPL or BRK.B.");
-    await toggleWatch(symbol, true);
-  }});
 }
 async function getScan(id) {
   if (String(state.latest?.id) === String(id)) return state.latest;
@@ -658,7 +637,7 @@ function renderStockDetail() {
     ["Relative strength vs SPY", numeric(metrics.relative_strength) ? `${metrics.relative_strength > 0 ? "+" : ""}${number(metrics.relative_strength, 2)} pp` : "Unavailable"],
     ["Prior 20D high distance", percent(metrics.breakout_distance)]
   ];
-  $("#stock-detail").innerHTML = `<div class="stock-header"><div class="stock-header-top"><div class="stock-identity">${avatar(stock.symbol)}<div><h2 id="stock-title">${escapeHTML(stock.symbol)}</h2><p>${escapeHTML(stock.name)} · ${escapeHTML(stock.sector || "Sector unavailable")}</p></div></div><div class="stock-header-actions"><button class="button subtle" id="detail-watch-button" data-watch="${escapeHTML(stock.symbol)}"></button><button class="icon-button" data-close aria-label="Close stock details">${icon("close")}</button></div></div><div class="stock-price-row"><div><div class="stock-price-large">${money(stock.price)}<small class="${changeClass(stock.change_pct)}">${percent(stock.change_pct)}</small></div><div class="stock-as-of">${escapeHTML(sourceName(scan.source))} · ${escapeHTML(scan.feed || "Daily closes")} · ${dateLabel(stock.as_of)}${scan.source === "demo" ? " · Prices are synthetic" : ""}</div></div><div class="stock-score"><div class="score-circle" style="--score-angle:${Math.min(100, Math.max(0, stock.score)) * 3.6}deg">${number(stock.score)}</div><div><strong>Signal score</strong><small>Ranking, not probability</small></div></div></div></div><section class="stock-chart-section"><div class="chart-heading"><span>Daily closing price · USD</span><div class="chart-range" role="group" aria-label="Chart range"><button data-range="20">20D</button><button data-range="60" class="active">60D</button><button data-range="120">120D</button></div></div><div id="detail-chart" class="detail-chart" tabindex="0" aria-label="Historical closing prices. Use left and right arrow keys to explore values."></div><div id="detail-chart-dates" class="chart-dates"></div></section><div class="stock-metrics">${metricItems.map(([label, value]) => `<div class="stock-metric"><small>${label}</small><strong>${value}</strong></div>`).join("")}</div><div class="detail-bottom"><section><h3>What’s behind the score</h3>${(stock.signals || []).map((signal) => `<div class="signal-row"><div class="signal-label"><span>${escapeHTML(signal.name)}</span><strong>${number(signal.points, 1)} <span class="neutral">/ ${number(signal.max_points)}</span></strong></div><div class="signal-bar" aria-hidden="true"><span style="width:${signal.max_points ? Math.max(0, Math.min(100, signal.points / signal.max_points * 100)) : 0}%"></span></div><p class="signal-description">${escapeHTML(signal.description)}</p></div>`).join("")}</section><section class="risk-box"><h3>${icon("shield")}Keep in perspective</h3>${stock.risks?.length ? `<ul>${stock.risks.map((risk) => `<li>${escapeHTML(risk)}</li>`).join("")}</ul>` : '<p>No specific technical warnings were flagged by this screen. Risk remains in every investment.</p>'}<p class="risk-note">A technical setup is a research lead. Scores are not calibrated odds of gains. Review the company, news, liquidity, and your own risk limits before making a decision.</p></section></div><footer class="detail-footer"><span>${escapeHTML(stock.exchange || "Exchange not provided")} · ${escapeHTML(scan.label || sourceName(scan.source))}</span><button class="text-button" data-action="method-from-stock">Understand the methodology ${icon("arrow-right")}</button></footer>`;
+  $("#stock-detail").innerHTML = `<div class="stock-header"><div class="stock-header-top"><div class="stock-identity">${avatar(stock.symbol)}<div><h2 id="stock-title">${escapeHTML(stock.symbol)}</h2><p>${escapeHTML(stock.name)} · ${escapeHTML(stock.sector || "Sector unavailable")}</p></div></div><div class="stock-header-actions"><button class="button subtle" data-candles="${escapeHTML(stock.symbol)}" title="Full-screen candlestick chart · 1m to 1D">${icon("trend")}<span class="watch-button-text">Candles</span></button><button class="button subtle" id="detail-watch-button" data-watch="${escapeHTML(stock.symbol)}"></button><button class="icon-button" data-close aria-label="Close stock details">${icon("close")}</button></div></div><div class="stock-price-row"><div><div class="stock-price-large">${money(stock.price)}<small class="${changeClass(stock.change_pct)}">${percent(stock.change_pct)}</small></div><div class="stock-as-of">${escapeHTML(sourceName(scan.source))} · ${escapeHTML(scan.feed || "Daily closes")} · ${dateLabel(stock.as_of)}${scan.source === "demo" ? " · Prices are synthetic" : ""}</div></div><div class="stock-score"><div class="score-circle" style="--score-angle:${Math.min(100, Math.max(0, stock.score)) * 3.6}deg">${number(stock.score)}</div><div><strong>Signal score</strong><small>Ranking, not probability</small></div></div></div></div><section class="stock-chart-section"><div class="chart-heading"><span>Daily closing price · USD</span><div class="chart-range" role="group" aria-label="Chart range"><button data-range="20">20D</button><button data-range="60" class="active">60D</button><button data-range="120">120D</button></div></div><div id="detail-chart" class="detail-chart" tabindex="0" aria-label="Historical closing prices. Use left and right arrow keys to explore values."></div><div id="detail-chart-dates" class="chart-dates"></div></section><div class="stock-metrics">${metricItems.map(([label, value]) => `<div class="stock-metric"><small>${label}</small><strong>${value}</strong></div>`).join("")}</div><div class="detail-bottom"><section><h3>What’s behind the score</h3>${(stock.signals || []).map((signal) => `<div class="signal-row"><div class="signal-label"><span>${escapeHTML(signal.name)}</span><strong>${number(signal.points, 1)} <span class="neutral">/ ${number(signal.max_points)}</span></strong></div><div class="signal-bar" aria-hidden="true"><span style="width:${signal.max_points ? Math.max(0, Math.min(100, signal.points / signal.max_points * 100)) : 0}%"></span></div><p class="signal-description">${escapeHTML(signal.description)}</p></div>`).join("")}</section><section class="risk-box"><h3>${icon("shield")}Keep in perspective</h3>${stock.risks?.length ? `<ul>${stock.risks.map((risk) => `<li>${escapeHTML(risk)}</li>`).join("")}</ul>` : '<p>No specific technical warnings were flagged by this screen. Risk remains in every investment.</p>'}<p class="risk-note">A technical setup is a research lead. Scores are not calibrated odds of gains. Review the company, news, liquidity, and your own risk limits before making a decision.</p></section></div><footer class="detail-footer"><span>${escapeHTML(stock.exchange || "Exchange not provided")} · ${escapeHTML(scan.label || sourceName(scan.source))}</span></footer>`;
   renderStockWatchButton(); renderDetailChart();
 }
 function renderDetailChart() {
@@ -734,7 +713,7 @@ async function exportScan(id) {
 function bindEvents() {
   hydrateIcons();
   $("#run-scan").addEventListener("click", runScan);
-  ["#edit-filters", "#method-edit-filters"].forEach((selector) => $(selector).addEventListener("click", openFilters));
+  $("#edit-filters").addEventListener("click", openFilters);
   ["#connection-button", "#sidebar-settings", "#connect-data"].forEach((selector) => $(selector).addEventListener("click", () => { if (state.settings) openSettings(); }));
   $("#filters-form").addEventListener("submit", saveFilters);
   $("#settings-form").addEventListener("submit", saveSettings);
@@ -747,7 +726,6 @@ function bindEvents() {
   $("#workspace-restore-file").addEventListener("change", () => { $("#workspace-restore-confirm").checked = false; updateRestoreControls(); });
   $("#workspace-restore-confirm").addEventListener("change", updateRestoreControls);
   $("#workspace-restore").addEventListener("click", restoreWorkspace);
-  $("#watchlist-add").addEventListener("click", addSymbol);
   $("#save-preset").addEventListener("click", savePreset);
   $("#preset-select").addEventListener("change", (event) => {
     const preset = state.presets.find((item) => item.id === event.target.value);
@@ -795,6 +773,7 @@ function bindEvents() {
     if (!state.settings) return;
     if (button.dataset.view) { changeView(button.dataset.view); return; }
     if (button.dataset.watch) { try { await toggleWatch(button.dataset.watch); } catch (_) { /* Already shown. */ } return; }
+    if (button.dataset.candles) { window.nomismaCandles?.(button.dataset.candles); return; }
     if (button.dataset.stock) { await openStock(button.dataset.stock, button.dataset.scan); return; }
     if (button.dataset.history) { await openHistory(button.dataset.history); return; }
     if (button.dataset.export) { await exportScan(button.dataset.export); return; }
@@ -817,8 +796,6 @@ function bindEvents() {
     const action = button.dataset.action;
     if (action === "filters") openFilters();
     if (action === "settings") openSettings();
-    if (action === "add-symbol") addSymbol();
-    if (action === "method-from-stock") { closeDialog($("#stock-dialog")); closeDialog($("#history-dialog")); changeView("methodology"); $("#main-content").focus(); }
     if (action === "retry-bootstrap") bootstrap();
   });
   window.addEventListener("hashchange", () => { if (state.settings) changeView(location.hash.slice(1), false); });

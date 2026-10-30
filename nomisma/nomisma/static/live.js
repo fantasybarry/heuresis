@@ -87,7 +87,7 @@
       <div class="live-overview" id="live-overview"></div>
       <div class="live-workspace">
         <section class="panel live-market-panel" aria-labelledby="live-radar-title">
-          <div class="live-panel-heading"><div><div class="section-heading"><h2 id="live-radar-title">Momentum radar</h2><span class="count-pill" id="live-symbol-count">0</span></div><p id="live-filter-summary">Your intraday rules, in real time.</p></div><button class="button subtle" id="live-export" disabled>Export CSV</button></div>
+          <div class="live-panel-heading"><div><div class="section-heading"><h2 id="live-radar-title">Momentum radar</h2><span class="count-pill" id="live-symbol-count">0</span></div><p id="live-filter-summary">Your intraday rules, in real time.</p></div><div class="live-radar-actions"><button class="button subtle" id="live-export" disabled>Export CSV</button><button class="button primary" id="live-scan" title="Run your saved candidate search and load the matching stocks into the radar">Scan now</button></div></div>
           <div class="live-table-toolbar"><label class="live-search"><span class="sr-only">Search monitored stocks</span><input id="live-search" type="search" placeholder="Search your symbols…"></label><label class="live-sort">Sort by<select id="live-sort">${sortOptions([["signal_score","Setup score"],["minute_relative_volume","1-minute RVOL"],["gap_pct","Opening gap"],["session_volume","Regular-session volume"],["symbol","Symbol A–Z"]])}</select></label></div>
           <label class="live-columns"><input type="checkbox" id="live-extra-columns"> Show technical setup, float & regular-session columns</label>
           <p id="live-ranking-note" class="live-ranking-note">Highest to lowest · total day volume includes premarket · scroll the table to inspect every metric</p><div id="live-table" class="live-table-scroll" tabindex="0" aria-label="Live stock metrics"></div>
@@ -309,6 +309,28 @@
       await pollDiscovery();
     }
   }
+  async function scanRadar() {
+    if (view.discoveryBusy || view.discoveryLoading || view.discoveryStatus?.running) return;
+    const note = q("#live-ranking-note"), noteText = note.textContent;
+    view.discoveryBusy = true;
+    showError("#live-error", "");
+    render();
+    try {
+      const {config} = view.discoverySettings || await loadDiscoverySettings(false);
+      const result = await researchJob("/api/discovery", config, (message) => { note.textContent = message; });
+      // The server has already saved the matches as the radar's symbols and restarted an active monitor.
+      if (!result?.rows?.length) throw new Error("No stocks meet your candidate search filters right now. Adjust them in Find candidates.");
+      if (view.snapshot?.status.running) await fetchSnapshot(); else await setRunning(true);
+      q("#live-announcement").textContent = `${Math.min(result.rows.length, symbolLimit())} qualified stocks loaded into the radar.`;
+    } catch (error) { showError("#live-error", error.message); }
+    finally {
+      view.discoveryBusy = false;
+      view.discoveryStatus = null;
+      note.textContent = noteText;
+      render();
+      pollDiscovery();
+    }
+  }
   function candidateSelection() {
     const running = !!view.snapshot?.status.running;
     const busy = view.discoveryBusy || view.discoveryLoading || !!view.discoveryStatus?.running;
@@ -400,6 +422,8 @@
     q("#live-stop").disabled = view.action;
     q("#live-config").disabled = view.action;
     q("#live-discover").disabled = view.action;
+    q("#live-scan").disabled = view.action || view.discoveryBusy || !!view.discoveryStatus?.running;
+    q("#live-scan").textContent = view.discoveryBusy || view.discoveryStatus?.running ? "Scanning…" : "Scan now";
     const refreshing = status.refresh?.state === "loading" || view.refreshing;
     const refreshAvailable = !!status.refresh;
     q("#live-refresh").disabled = !refreshAvailable || view.action || refreshing || view.alertsRefreshing || !running || !["live", "demo"].includes(status.connection);
@@ -471,7 +495,7 @@
     const symbol = escapeHTML(row.symbol);
     const volumeClass = numeric(row.minute_relative_volume) && row.minute_relative_volume >= 1.5 ? "live-volume-active" : "";
     return `<tr class="${row.stale ? "live-stale" : ""}">
-      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Open ${symbol} intraday report"><span class="live-symbol">${symbol}<span class="live-row-dot ${row.stale ? "stale" : ""}" title="${row.stale ? "Stale or unavailable market data" : "Price and quote freshness checked"}"></span></span><span class="live-setup ${levelClass(row.signal)}">${setup(row.signal)}</span></button></td>
+      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Open ${symbol} intraday report"><span class="live-symbol">${symbol}<span class="live-row-dot ${row.stale ? "stale" : ""}" title="${row.stale ? "Stale or unavailable market data" : "Price and quote freshness checked"}"></span></span><span class="live-setup ${levelClass(row.signal)}">${setup(row.signal)}</span></button><button type="button" class="live-candle-open" data-live-candles="${symbol}" title="Full-screen candles" aria-label="Open ${symbol} full-screen candlestick chart">${icon("trend")}</button></td>
       <td class="live-num" data-label="Price / day"><strong>${dollars(row.price)}</strong><small class="${direction(row.change_pct)}">${pct(row.change_pct)}</small></td>
       ${screeningCells(row)}
       <td class="live-eligibility">${eligibilityText(row)}</td>
@@ -540,18 +564,40 @@
     }
     return [...bars, {t:new Date(ms ? Math.floor(time / ms) * ms : time).toISOString(), open:row.price, high:row.price, low:row.price, close:row.price, volume:0, forming:true}];
   }
-  function candleChart(points, ms, width = 760, height = 300) {
+  const axisFormats = [{month:"short", day:"numeric"}, {month:"short", day:"numeric", year:"numeric"}, {hour:"numeric", minute:"2-digit"}, {weekday:"short", month:"short", day:"numeric", year:"numeric"}]
+    .map((options) => new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", ...options}));
+  const priceText = (value) => n(value, value < 1 ? 4 : 2);
+  function niceStep(span, count) {
+    // Round gridline spacing (1, 2 or 5 × a power of ten) so price levels read at a glance.
+    const raw = span / count, power = 10 ** Math.floor(Math.log10(raw)), unit = raw / power;
+    return power * (unit < 1.5 ? 1 : unit < 3 ? 2 : unit < 7 ? 5 : 10);
+  }
+  function candleChart(points, ms, width = 760, height = 320, first = 0) {
     view.candleGeo = null;
     if (!points.length) return '<p class="live-chart-empty">Alpaca returned no candles for this timeframe.</p>';
-    const left = 12, right = 70, priceBottom = height - 90, volumeTop = height - 68, volumeBottom = height - 14;
+    const left = 12, right = 70, top = 10, priceBottom = height - 104, volumeTop = height - 84, volumeBottom = height - 26;
     const low = Math.min(...points.map((bar) => bar.low)), high = Math.max(...points.map((bar) => bar.high)), pad = Math.max((high - low) * .06, high * .001, .005);
     const min = low - pad, max = high + pad, step = (width - left - right) / points.length, body = Math.max(1, step * .7);
     const x = (i) => left + step * (i + .5);
-    const y = (price) => 10 + (max - price) / (max - min) * (priceBottom - 10);
+    const y = (price) => top + (max - price) / (max - min) * (priceBottom - top);
     const maxVolume = Math.max(1, ...points.map((bar) => bar.volume || 0));
-    const label = (t) => ms ? escapeHTML(candleTime.format(new Date(t))) : date(nyDay(t));
-    const last = points[points.length - 1], lastY = y(last.close);
-    const grid = [0, 1, 2, 3].map((i) => { const value = min + (max - min) * i / 3; return `<line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="#dce5d9" stroke-dasharray="3 5"/>${Math.abs(y(value) - lastY) < 16 ? "" : `<text x="${width - right + 10}" y="${y(value) + 4}" fill="#637360" font-size="11">${n(value, value < 1 ? 4 : 2)}</text>`}`; }).join("");
+    const label = (t) => escapeHTML((ms ? candleTime : axisFormats[3]).format(new Date(t)));
+    const last = points[points.length - 1], lastY = y(last.close), lastColor = last.close >= (points[points.length - 2]?.close ?? last.open) ? "#39704b" : "#b4553f";
+    const tick = niceStep(max - min, Math.max(3, Math.round((priceBottom - top) / 60)));
+    let grid = "";
+    for (let value = Math.ceil(min / tick) * tick; value <= max; value += tick) {
+      grid += `<line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="#e3eadf"/>${Math.abs(y(value) - lastY) < 14 ? "" : `<text x="${width - right + 10}" y="${y(value) + 4}" fill="#637360" font-size="11">${priceText(value)}</text>`}`;
+    }
+    // Time labels sit on fixed bars of the whole series, so they stay put while the chart pans.
+    const every = Math.max(1, Math.ceil(110 / step));
+    let axis = "", previous = "";
+    points.forEach((bar, i) => {
+      if ((first + i) % every || x(i) < left + 30 || x(i) > width - right - 30) return;
+      const time = new Date(bar.t), day = nyDay(bar.t), newDay = day !== previous;
+      const text = ms ? axisFormats[newDay ? 0 : 2].format(time) : axisFormats[day.slice(0, 4) !== previous.slice(0, 4) ? 1 : 0].format(time);
+      axis += `<line x1="${x(i)}" x2="${x(i)}" y1="${top}" y2="${volumeBottom}" stroke="#eef2ea"/><text x="${x(i)}" y="${height - 8}" text-anchor="middle" fill="#637360" font-size="11"${ms && newDay ? ' font-weight="600"' : ""}>${escapeHTML(text)}</text>`;
+      previous = day;
+    });
     const candles = points.map((bar, i) => {
       const up = bar.close >= bar.open, color = up ? "#39704b" : "#b4553f", h = (bar.volume || 0) / maxVolume * (volumeBottom - volumeTop);
       return `<g><line x1="${x(i)}" x2="${x(i)}" y1="${y(bar.high)}" y2="${y(bar.low)}" stroke="${color}" vector-effect="non-scaling-stroke"/><rect x="${x(i) - body / 2}" y="${y(Math.max(bar.open, bar.close))}" width="${body}" height="${Math.max(1, Math.abs(y(bar.open) - y(bar.close)))}" fill="${color}"/><rect x="${x(i) - body / 2}" y="${volumeBottom - h}" width="${body}" height="${h}" fill="${up ? "#9ab68c" : "#c5a391"}"/></g>`;
@@ -560,23 +606,24 @@
     let bands = "";
     for (let i = 0, j; i < sessions.length; i = j) {
       for (j = i + 1; j < sessions.length && sessions[j] === sessions[i]; j++);
-      if (sessions[i]) bands += `<rect x="${left + step * i}" y="10" width="${step * (j - i)}" height="${volumeBottom - 10}" fill="${sessionFill[sessions[i]]}"/>`;
+      if (sessions[i]) bands += `<rect x="${left + step * i}" y="${top}" width="${step * (j - i)}" height="${volumeBottom - top}" fill="${sessionFill[sessions[i]]}" opacity=".45"/>`;
     }
-    view.candleGeo = {points, sessions, label, width, left, right, step, priceBottom, volumeTop, volumeBottom, min, max};
-    return `<svg viewBox="0 0 ${width} ${height}" class="live-price-chart" tabindex="0" role="img" aria-label="${points.length} candles from ${label(points[0].t)} to ${label(last.t)}. Last close ${dollars(last.close)}.">${bands}${grid}${candles}<line x1="${left}" x2="${width - right}" y1="${lastY}" y2="${lastY}" stroke="${last.close >= last.open ? "#39704b" : "#b4553f"}" stroke-dasharray="2 3" opacity=".7"/><rect x="${width - right + 4}" y="${lastY - 9}" width="${right - 6}" height="18" rx="3" fill="${last.close >= last.open ? "#39704b" : "#b4553f"}"/><text x="${width - right + 9}" y="${lastY + 4}" fill="#fff" font-size="11">${n(last.close, last.close < 1 ? 4 : 2)}</text><text x="${left}" y="${height - 74}" fill="#637360" font-size="10">VOLUME</text><text x="${width - right + 10}" y="${volumeTop + 8}" fill="#637360" font-size="11">${short(maxVolume)}</text><g class="live-candle-hover" pointer-events="none">${candleHover().svg}</g></svg><div class="live-chart-times"><span>${label(points[0].t)}</span><span>${label(points[Math.floor(points.length / 2)].t)}</span><span>${label(last.t)}</span></div>`;
+    view.candleGeo = {points, sessions, label, width, height, left, right, top, step, priceBottom, volumeTop, volumeBottom, min, max};
+    return `<svg viewBox="0 0 ${width} ${height}" class="live-price-chart" tabindex="0" role="img" aria-label="${points.length} candles from ${label(points[0].t)} to ${label(last.t)}. Last close ${dollars(last.close)}.">${bands}${grid}${axis}<line x1="${left}" x2="${width - right}" y1="${volumeTop - 6}" y2="${volumeTop - 6}" stroke="#dce5d9"/>${candles}<line x1="${left}" x2="${width - right}" y1="${lastY}" y2="${lastY}" stroke="${lastColor}" stroke-dasharray="2 3" opacity=".7"/><rect x="${width - right + 4}" y="${lastY - 9}" width="${right - 6}" height="18" rx="3" fill="${lastColor}"/><text x="${width - right + 9}" y="${lastY + 4}" fill="#fff" font-size="11">${priceText(last.close)}</text><text x="${left + 4}" y="${volumeTop + 6}" fill="#8a987c" font-size="10">Volume</text><text x="${width - right + 10}" y="${volumeTop + 8}" fill="#637360" font-size="11">${short(maxVolume)}</text><g class="live-candle-hover" pointer-events="none">${candleHover().svg}</g></svg>`;
   }
   function candleHover() {
     // Crosshair for the candle under the pointer; the readout shows the newest candle when not hovering.
     const g = view.candleGeo, h = view.candleHover;
     if (!g) return {svg:"", text:""};
     const i = h ? Math.max(0, Math.min(g.points.length - 1, Math.floor((h.x - g.left) / g.step))) : g.points.length - 1;
-    const bar = g.points[i], change = bar.open ? (bar.close - bar.open) / bar.open * 100 : null;
-    const text = `<strong>${g.label(bar.t)}${g.sessions[i] ? ` · ${sessionName[g.sessions[i]]}` : ""}${bar.forming ? " · forming" : ""}</strong><span>O ${dollars(bar.open)}</span><span>H ${dollars(bar.high)}</span><span>L ${dollars(bar.low)}</span><span>C ${dollars(bar.close)}</span><span class="${direction(change)}">${pct(change)}</span><span>Vol ${n(bar.volume)}</span>`;
+    const bar = g.points[i], base = g.points[i - 1]?.close ?? bar.open, change = base ? (bar.close - base) / base * 100 : null;
+    const text = `<span class="live-readout-time">${g.label(bar.t)}${g.sessions[i] ? ` · ${sessionName[g.sessions[i]]}` : ""}${bar.forming ? " · forming" : ""}</span><strong class="live-readout-price">${dollars(bar.close)}</strong><span class="live-readout-change ${direction(change)}">${pct(change)}</span><span>Open <b>${dollars(bar.open)}</b></span><span>High <b>${dollars(bar.high)}</b></span><span>Low <b>${dollars(bar.low)}</b></span><span>Volume <b>${short(bar.volume)}</b></span>`;
     if (!h) return {svg:"", text};
     const x = g.left + g.step * (i + .5), tag = (y, value, fill) => `<line x1="${g.left}" x2="${g.width - g.right}" y1="${y}" y2="${y}" stroke="#637360" stroke-dasharray="3 3" opacity=".6"/><rect x="${g.width - g.right + 4}" y="${y - 9}" width="${g.right - 6}" height="18" rx="3" fill="${fill}"/><text x="${g.width - g.right + 9}" y="${y + 4}" fill="#fff" font-size="11">${value}</text>`;
-    const price = g.max - (h.y - 10) / (g.priceBottom - 10) * (g.max - g.min);
-    const level = h.y >= 10 && h.y <= g.priceBottom ? tag(h.y, n(price, price < 1 ? 4 : 2), "#4d5d49") : h.y >= g.volumeTop && h.y <= g.volumeBottom ? tag(h.y, short(bar.volume), "#7d8f72") : "";
-    return {svg:`<rect x="${x - g.step / 2}" y="10" width="${g.step}" height="${g.volumeBottom - 10}" fill="#39704b" opacity=".07"/><line x1="${x}" x2="${x}" y1="10" y2="${g.volumeBottom}" stroke="#637360" stroke-dasharray="3 3" opacity=".6"/>${level}`, text};
+    const price = g.max - (h.y - g.top) / (g.priceBottom - g.top) * (g.max - g.min);
+    const level = h.y >= g.top && h.y <= g.priceBottom ? tag(h.y, priceText(price), "#4d5d49") : h.y >= g.volumeTop && h.y <= g.volumeBottom ? tag(h.y, short(bar.volume), "#7d8f72") : "";
+    const when = g.label(bar.t), half = when.length * 3.6 + 10, at = Math.max(g.left + half, Math.min(g.width - g.right - half, x));
+    return {svg:`<rect x="${x - g.step / 2}" y="${g.top}" width="${g.step}" height="${g.volumeBottom - g.top}" fill="#39704b" opacity=".07"/><line x1="${x}" x2="${x}" y1="${g.top}" y2="${g.volumeBottom}" stroke="#637360" stroke-dasharray="3 3" opacity=".6"/>${level}<rect x="${at - half}" y="${g.height - 21}" width="${half * 2}" height="18" rx="3" fill="#4d5d49"/><text x="${at}" y="${g.height - 8}" text-anchor="middle" fill="#fff" font-size="11">${when}</text>`, text};
   }
   function drawCandleHover() {
     const {svg, text} = candleHover(), layer = q("#live-candle-chart .live-candle-hover"), readout = q("#live-candle-readout");
@@ -592,13 +639,14 @@
     view.candleOffset = Math.max(0, Math.min(view.candleOffset, all.length - count));
     const stop = all.length - Math.round(view.candleOffset);
     const note = data.loadingOlder ? "Loading older candles…" : data.exhausted && stop - count === 0 ? "Start of available history." : "";
-    const chart = all.length || !data.error ? candleChart(all.slice(stop - count, stop), ms, ...(view.candleFull ? [Math.max(400, Math.round((innerWidth - 48) / 1.4)), Math.max(240, Math.round((innerHeight - 180) / 1.4))] : [])) : "";
-    return `${data.error ? `<p class="live-chart-empty">Candles unavailable: ${escapeHTML(data.error)}</p>` : ""}<div id="live-candle-readout" class="live-candle-readout" aria-hidden="true">${candleHover().text}</div>${chart}<div class="live-candle-nav"><span>${ms ? `<span class="live-session-key"><i style="background:${sessionFill.pre}"></i>Pre-market<i></i>Regular<i style="background:${sessionFill.post}"></i>After-hours</span>` : ""}${note}</span><span class="live-tf-group"><button type="button" class="button subtle" data-live-candle-zoom="1.25" aria-label="Zoom out">−</button><button type="button" class="button subtle" data-live-candle-zoom="0.8" aria-label="Zoom in">+</button>${Math.round(view.candleOffset) ? '<button type="button" class="button subtle" data-live-candle-latest>Latest ›</button>' : ""}</span></div>`;
+    const chart = all.length || !data.error ? candleChart(all.slice(stop - count, stop), ms, ...(view.candleFull ? [Math.max(400, Math.round((innerWidth - 48) / 1.4)), Math.max(240, Math.round((innerHeight - 170) / 1.4))] : [760, 320]), stop - count) : "";
+    return `${data.error ? `<p class="live-chart-empty">Candles unavailable: ${escapeHTML(data.error)}</p>` : ""}<div id="live-candle-readout" class="live-candle-readout" aria-hidden="true">${candleHover().text}</div>${chart}<div class="live-candle-nav"><span>${ms ? `<span class="live-session-key"><i style="background:${sessionFill.pre}"></i>Pre-market<i></i>Regular<i style="background:${sessionFill.post}"></i>After-hours</span>` : ""}${note}</span><span class="live-tf-group">${Math.round(view.candleOffset) ? '<button type="button" class="button subtle" data-live-candle-latest>Jump to latest ›</button>' : ""}<button type="button" class="button subtle" data-live-candle-zoom="1.25" aria-label="Zoom out" title="Zoom out (−)">−</button><button type="button" class="button subtle" data-live-candle-zoom="0.8" aria-label="Zoom in" title="Zoom in (+)">+</button></span></div>`;
   }
   function candleSection(row) {
     if (row.source !== "alpaca") return "";
     const buttons = candleFrames.map(([tf, text]) => `<button type="button" class="button subtle" data-live-tf="${tf}" aria-pressed="${tf === view.candleTf}">${text}</button>`).join("");
-    return `<section class="live-report-section${view.candleFull ? " live-candle-full" : ""}"><div class="live-report-section-title"><h3>${view.candleFull ? `${escapeHTML(row.symbol)} · Candles` : "Candles"}</h3><div class="live-tf-group"><div class="live-tf-group" role="group" aria-label="Candle timeframe">${buttons}</div><button type="button" class="button subtle" data-live-candle-full>${view.candleFull ? "Exit full screen" : "Full screen"}</button></div></div><div id="live-candle-chart" class="live-candle-chart">${candleBody(row)}</div><p class="field-help">Drag, swipe sideways or press ←/→ to scroll back. Hover for price and volume. Pinch, ⌘/Ctrl + scroll${view.candleFull ? ", scroll" : ""} or +/− to zoom at the pointer; double-click to reset. Alpaca ${escapeHTML(String(row.feed || "").toUpperCase())} bars, extended hours included. The newest candle follows live trades and history refreshes every 15 seconds.</p></section>`;
+    const exit = row.chartOnly ? "✕ Close" : view.candleFull ? "Exit full screen" : "Full screen";
+    return `<section class="live-report-section${view.candleFull ? " live-candle-full" : ""}"><div class="live-report-section-title"><h3>${view.candleFull ? `${escapeHTML(row.symbol)} <span>Candles · Alpaca, extended hours included</span>` : "Candles"}</h3><div class="live-tf-group"><div class="live-tf-group live-tf-segment" role="group" aria-label="Candle timeframe">${buttons}</div><button type="button" class="button subtle" data-live-candle-full>${exit}</button></div></div><div id="live-candle-chart" class="live-candle-chart">${candleBody(row)}</div><p class="field-help live-candle-help"><span>Drag or ←/→ to scroll back</span><span>${view.candleFull ? "Scroll" : "⌘/Ctrl + scroll"}, pinch or +/− to zoom</span><span>Double-click to reset</span>${view.candleFull ? "<span>Esc to close</span>" : ""}<span>Updates every 15 seconds</span></p></section>`;
   }
   function renderCandles() {
     const box = q("#live-candle-chart");
@@ -683,6 +731,11 @@
     return `<section class="live-report-section live-screening-report"><div class="live-report-section-title"><h3>Liquidity & volatility</h3><span>Rank ${n(row.rank)} by total day volume</span></div><p class="field-help">History through ${date(row.history_as_of)}; today excluded.</p><dl class="live-report-metrics">${reportMetric("Average volume (3-month)", n(row.avg_volume_3m), "63 prior trading sessions")}${reportMetric("Relative volume (day)", ratio(row.day_relative_volume), "Total day volume ÷ 20-session average; not time adjusted")}${reportMetric("Bid–ask spread", dollars(row.spread), `${numeric(row.spread_pct) ? n(row.spread_pct, 2) + "% of midpoint" : "Unavailable"} · quote ${clock(row.quote_at)}`)}${reportMetric("Average daily volume", n(row.avg_daily_volume), "20 prior trading sessions")}${reportMetric("Beta vs SPY", n(row.beta, 2), `${n(row.beta_observations)} paired daily price returns; up to 252, minimum 60`)}${reportMetric("Average true range (14)", dollars(row.atr), `${numeric(row.atr_pct) ? n(row.atr_pct, 2) + "% of prior close" : "Unavailable"} · Wilder smoothing`)}</dl></section>`;
   }
   function renderReport(force = false) {
+    if (view.selectedDetail?.chartOnly) {
+      q("#live-report-dialog").classList.add("candle-full");
+      if (force || view.detailKey !== "chart") { view.detailKey = "chart"; q("#live-report-data").innerHTML = candleSection(view.selectedDetail); }
+      return;
+    }
     const listed = view.snapshot.rows?.some((item) => item.symbol === view.selected);
     const row = listed && view.selectedDetail?.symbol === view.selected ? view.selectedDetail : null;
     q("#live-report-dialog").classList.toggle("candle-full", view.candleFull);
@@ -715,6 +768,20 @@
     if (chartOpen && q("#live-report-data .live-chart-data")) q("#live-report-data .live-chart-data").open = true;
     if (candleFocused) q("#live-candle-chart svg")?.focus({preventScroll:true});
   }
+  function showChart(symbol) {
+    // Full-screen candles for a symbol outside the monitor, such as a daily screener result.
+    view.selected = symbol;
+    // A monitored symbol's newest candle follows its live trades while they are fresh.
+    const live = view.snapshot?.rows?.find((item) => item.symbol === symbol && !item.stale);
+    view.selectedDetail = {price:live?.price, price_at:live?.price_at, symbol, source:"alpaca", chartOnly:true};
+    view.candleFull = true;
+    view.candleOffset = 0;
+    view.candleHover = null;
+    q("#live-report-title").textContent = `${symbol} · Candles`;
+    renderReport(true);
+    openDialog(q("#live-report-dialog"), "[data-live-candle-full]");
+    loadCandles(true);
+  }
   function showStock(symbol) {
     view.selected = symbol;
     view.selectedDetail = null;
@@ -735,6 +802,12 @@
   async function fetchSelectedDetail(force = false) {
     if (!view.selected || !q("#live-report-dialog").open || document.hidden || document.body.classList.contains("printing-live-report")) return;
     if (view.detailFetching || (!force && Date.now() - view.detailReceivedAt < 2000)) return;
+    if (view.selectedDetail?.chartOnly) {
+      const live = view.snapshot?.rows?.find((item) => item.symbol === view.selected && !item.stale);
+      if (live && live.price_at !== view.selectedDetail.price_at) { Object.assign(view.selectedDetail, {price:live.price, price_at:live.price_at}); renderCandles(); }
+      loadCandles();
+      return;
+    }
     const selected = view.selected;
     const summary = view.snapshot?.rows?.find((row) => row.symbol === selected);
     if (!summary) { view.selectedDetail = null; renderReport(); return; }
@@ -856,7 +929,7 @@
     try {
       const bootstrap = await api("/api/bootstrap");
       const all = kind === "watchlist" ? bootstrap.watchlist || [] : (bootstrap.latest?.results || []).map((row) => row.symbol);
-      if (!all.length) throw new Error(kind === "watchlist" ? "Your watchlist is empty. Add symbols in Watchlist first." : "The latest daily scan has no matching symbols. Run the daily screener first.");
+      if (!all.length) throw new Error(kind === "watchlist" ? "Your watchlist is empty. Star symbols in the daily screener first." : "The latest daily scan has no matching symbols. Run the daily screener first.");
       q("#live-symbols").value = all.slice(0, symbolLimit()).join(", ");
       q("#live-import-note").textContent = `Loaded ${Math.min(symbolLimit(), all.length)} symbols${all.length > symbolLimit() ? ` from ${all.length}; only the first ${symbolLimit()} fit` : ""}. Review the source and price range before saving.`;
       showError("#live-config-error", "");
@@ -1030,6 +1103,7 @@
     q("#live-start").addEventListener("click", () => setRunning(true));
     q("#live-stop").addEventListener("click", () => setRunning(false));
     q("#live-export").addEventListener("click", exportRows);
+    q("#live-scan").addEventListener("click", scanRadar);
     q("#live-search").addEventListener("input", (event) => { view.query = event.target.value.trim().toLowerCase(); if (view.snapshot) renderTable(); });
     q("#live-sort").addEventListener("change", (event) => { view.sort = event.target.value; if (view.snapshot) renderTable(); });
     q("#live-ack-all").addEventListener("click", () => acknowledge({all:true}));
@@ -1078,6 +1152,8 @@
     document.addEventListener("click", (event) => {
       const close = event.target.closest("[data-live-close]");
       if (close) close.closest("dialog").close();
+      const candles = event.target.closest("[data-live-candles]");
+      if (candles) window.nomismaCandles(candles.dataset.liveCandles);
       const stock = event.target.closest("[data-live-symbol]");
       if (stock && view.snapshot) showStock(stock.dataset.liveSymbol);
       const alert = event.target.closest("[data-live-alert]");
@@ -1087,7 +1163,8 @@
       const frame = event.target.closest("[data-live-tf]");
       if (frame) { view.candleTf = frame.dataset.liveTf; view.candleOffset = 0; renderReport(true); loadCandles(true); }
       if (event.target.closest("[data-live-candle-latest]")) moveCandles(0);
-      if (event.target.closest("[data-live-candle-full]")) {
+      if (event.target.closest("[data-live-candle-full]") && view.selectedDetail?.chartOnly) q("#live-report-dialog").close();
+      else if (event.target.closest("[data-live-candle-full]")) {
         view.candleFull = !view.candleFull;
         screenFull(view.candleFull);
         renderReport(true);
@@ -1097,13 +1174,28 @@
     });
     document.addEventListener("dblclick", (event) => { if (event.target.closest("#live-candle-chart svg")) moveCandles(0, 120); });
     // Without the Fullscreen API (desktop web views), Esc leaves the chart overlay instead of closing the report.
-    q("#live-report-dialog").addEventListener("cancel", (event) => { if (view.candleFull) { event.preventDefault(); view.candleFull = false; screenFull(false); renderReport(true); } });
+    q("#live-report-dialog").addEventListener("cancel", (event) => { if (view.candleFull && !view.selectedDetail?.chartOnly) { event.preventDefault(); view.candleFull = false; screenFull(false); renderReport(true); } });
     // The report dialog fills the window around the chart; the desktop window or browser then fills the screen.
     const screenFull = (on) => window.nomismaDesktop?.fullScreen ? window.nomismaDesktop.fullScreen(on).catch(() => {})
       : on ? q("#live-report-dialog").requestFullscreen?.().catch(() => {}) : document.fullscreenElement && document.exitFullscreen();
-    const leaveFull = () => { if (view.candleFull && !document.fullscreenElement) { view.candleFull = false; renderReport(true); } };
+    // Only an exit from this dialog's own full screen counts; a late event from a closed chart must not close a new one.
+    let fullscreen = false;
+    const leaveFull = () => {
+      if (document.fullscreenElement) { fullscreen = document.fullscreenElement === q("#live-report-dialog"); return; }
+      if (!fullscreen || !view.candleFull) return;
+      fullscreen = false;
+      if (view.selectedDetail?.chartOnly) q("#live-report-dialog").close();
+      else { view.candleFull = false; renderReport(true); }
+    };
     document.addEventListener("fullscreenchange", leaveFull);
-    q("#live-report-dialog").addEventListener("close", () => { if (view.candleFull) { view.candleFull = false; screenFull(false); } });
+    q("#live-report-dialog").addEventListener("close", () => {
+      // The close event arrives a task later; if a chart has reopened the dialog since, it is not closed any more.
+      if (q("#live-report-dialog").open) return;
+      fullscreen = false;
+      if (view.candleFull) { view.candleFull = false; screenFull(false); }
+      if (view.selectedDetail?.chartOnly) { view.selected = view.selectedDetail = null; view.detailKey = ""; q("#live-report-dialog").classList.remove("candle-full"); }
+    });
+    window.nomismaCandles = (symbol) => { showChart(symbol); screenFull(true); };
     window.addEventListener("resize", () => { if (view.candleFull) renderCandles(); });
     // Candle chart markup is replaced on every update, so its gestures are delegated from the document.
     const candlePlot = (clientX) => {

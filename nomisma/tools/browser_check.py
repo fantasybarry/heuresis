@@ -225,6 +225,37 @@ def check_live(client, app, server_port, output, temporary):
     print("PASS mobile intraday dashboard, stock report, and configuration layout")
     client.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1050, "deviceScaleFactor": 1, "mobile": False})
 
+    configured = list(app.monitor.config["symbols"])
+    client.evaluate("document.querySelector('#live-scan').click()")
+    client.wait("document.querySelector('#live-scan').textContent === 'Scanning…'")
+    client.wait("document.querySelector('#live-scan').textContent === 'Scan now' && !document.querySelector('#live-stop').classList.contains('hidden')", seconds=60)
+    expected = [row["symbol"] for row in app.discovery_snapshot()["latest"]["result"]["rows"]][:50]
+    assert expected and app.monitor.config["symbols"] == expected and app.monitor.status["running"]
+    client.evaluate("document.querySelector('#live-stop').click()")
+    client.wait("document.querySelector('#live-connection').textContent.includes('stopped')")
+    app.monitor.save_config({"symbols": configured})
+    print("PASS radar scan loads qualified candidates and starts the monitor")
+
+    client.wait("document.querySelectorAll('#live-table [data-live-candles]').length > 0")
+    client.evaluate("document.querySelector('#live-table [data-live-candles]').click()")
+    client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-dialog').classList.contains('candle-full')")
+    client.evaluate("document.querySelector('[data-live-candle-full]').click()")
+    client.wait("!document.querySelector('#live-report-dialog').open")
+    print("PASS radar rows open full-screen candles")
+
+    client.evaluate("location.hash = 'dashboard'")
+    client.wait("document.querySelectorAll('#results-table [data-candles]').length > 0")
+    symbol = client.evaluate("document.querySelector('#results-table [data-candles]').dataset.candles")
+    client.evaluate("document.querySelector('#results-table [data-candles]').click()")
+    client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-dialog').classList.contains('candle-full')")
+    assert client.evaluate("document.querySelector('#live-report-data .live-candle-full h3').textContent").startswith(symbol + " Candles")
+    client.evaluate("document.querySelector('[data-live-tf=\"1Day\"]').click()")
+    client.wait("document.querySelector('[data-live-tf=\"1Day\"]').getAttribute('aria-pressed') === 'true'")
+    client.evaluate("document.querySelector('[data-live-candle-full]').click()")
+    client.wait("!document.querySelector('#live-report-dialog').open && !document.querySelector('#live-report-dialog').classList.contains('candle-full')")
+    client.evaluate("location.hash = 'live'")
+    print("PASS daily screener opens full-screen candles with selectable timeframes")
+
 
 
 METRIC_SORT_FIELDS = ("liquidity_volatility_score", "day_volume", "avg_volume_3m", "avg_daily_volume",
@@ -768,17 +799,13 @@ def run(output, chrome, alerts_only=False):
             client.screenshot(output / "stock-detail.png")
             client.evaluate("document.querySelector('#stock-dialog').close()")
             client.evaluate("document.querySelector('#results-table [data-watch]').click()")
-            client.wait("document.querySelector('#watchlist-count').textContent.trim() === '1'")
-            client.evaluate("document.querySelector('[data-view=watchlist]').click()")
-            client.wait("!document.querySelector('#watchlist-view').classList.contains('hidden')")
+            client.wait("document.querySelector('#results-table [data-watch]').classList.contains('saved')")
             print("PASS stock detail and persistent watchlist interaction")
 
             client.evaluate("document.querySelector('[data-view=history]').click()")
             client.wait("!document.querySelector('#history-view').classList.contains('hidden') && document.querySelector('#history-results').textContent.includes('2025')")
-            client.evaluate("document.querySelector('[data-view=methodology]').click()")
-            client.wait("!document.querySelector('#methodology-view').classList.contains('hidden')")
             client.evaluate("document.querySelector('[data-view=dashboard]').click()")
-            print("PASS history and methodology navigation")
+            print("PASS history navigation")
 
             client.evaluate("document.querySelector('#edit-filters').click()")
             client.wait("document.querySelector('#filters-dialog').open")

@@ -190,8 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         view.addItem(.separator())
         item(view, "Live Monitor", #selector(showLive), "1", target: self)
         item(view, "Daily Screener", #selector(showDaily), "2", target: self)
-        item(view, "Watchlist", #selector(showWatchlist), "3", target: self)
-        item(view, "Scan History", #selector(showHistory), "4", target: self)
+        item(view, "Scan History", #selector(showHistory), "3", target: self)
         let windowMenu = submenu("Window")
         item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))
@@ -211,7 +210,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc private func showSettings() { showMainWindow(); evaluateTrusted("document.querySelector('#sidebar-settings')?.click()") }
     @objc private func showLive() { showMainWindow(); evaluateTrusted("location.hash = 'live'") }
     @objc private func showDaily() { showMainWindow(); evaluateTrusted("location.hash = 'dashboard'") }
-    @objc private func showWatchlist() { showMainWindow(); evaluateTrusted("location.hash = 'watchlist'") }
     @objc private func showHistory() { showMainWindow(); evaluateTrusted("location.hash = 'history'") }
     @objc private func showDataFolder() { if let url = dataDirectory { NSWorkspace.shared.open(url) } }
     @objc private func showConfigurationFolder() { if let url = envFile { NSWorkspace.shared.open(url.deletingLastPathComponent()) } }
@@ -227,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if menuItem.action == #selector(showDataFolder) { return dataDirectory != nil }
         if menuItem.action == #selector(showConfigurationFolder) { return envFile != nil }
         let needsWorkspace: [Selector] = [#selector(showSettings), #selector(showLive), #selector(showDaily),
-            #selector(showWatchlist), #selector(showHistory), #selector(openInBrowser), #selector(printPage)]
+            #selector(showHistory), #selector(openInBrowser), #selector(printPage)]
         if let action = menuItem.action, needsWorkspace.contains(action) {
             return webView.url.map { isTrusted($0) } == true && !webView.isHidden
         }

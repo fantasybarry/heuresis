@@ -59,6 +59,7 @@ _BOUNDS = {
 }
 _BOOLEAN_FIELDS = ("above_sma50", "above_sma200", "positive_macd")
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9./-]{0,14}\Z")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 
 
 def _number(value, minimum=0, maximum=1e15):
@@ -106,7 +107,7 @@ def validate_filters(filters):
 
 
 def _date(value):
-    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+    if not isinstance(value, str) or not _DATE.match(value):
         raise ValueError("Dates must use YYYY-MM-DD.")
     try:
         return date.fromisoformat(value)
@@ -136,7 +137,9 @@ def _validated_bars(raw, cutoff):
         for key in ("open", "high", "low", "close", "volume"):
             value = item.get(key)
             maximum = 1000000000000000 if key == "volume" else 1000000000
-            if not _number(value, 0, maximum):
+            # Plain finite ints and floats pass the range test directly; NaN and infinity fail it.
+            # Anything else gets the full check. Validation runs for millions of bars per scan.
+            if not ((type(value) is float or type(value) is int) and 0 <= value <= maximum) and not _number(value, 0, maximum):
                 raise ValueError("Invalid {} value.".format(key))
             if key != "volume" and value < 0.000001:
                 raise ValueError("OHLC prices must be at least $0.000001.")

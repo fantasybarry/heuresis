@@ -279,17 +279,6 @@ select {
 .top-link:hover {
   color:var(--green)
 }
-.nav-count {
-  display:inline-grid;
-  place-items:center;
-  min-width:18px;
-  height:18px;
-  border-radius:4px;
-  background:#ecf0e8;
-  color:#668263;
-  font-size:10px;
-  margin-left:4px
-}
 .connection-status {
   background:none;
   display:flex;
@@ -924,6 +913,9 @@ h1>span {
   width:13px;
   height:13px
 }
+.row-actions {
+  white-space:nowrap
+}
 .table-footer {
   padding:15px 20px;
   border-top:1px solid #edf0e7;
@@ -1151,10 +1143,6 @@ h1>span {
   line-height:1.75;
   margin:6px 0 10px
 }
-.research-note .text-button {
-  font-size:9px;
-  font-weight:500
-}
 .page-footer {
   display:flex;
   align-items:center;
@@ -1290,58 +1278,6 @@ h1>span {
   padding-left:16px;
   margin-bottom:3px
 }
-.watchlist-symbols {
-  display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
-  gap:14px;
-  padding:0 22px 22px
-}
-.watch-card {
-  border:1px solid #e7edde;
-  border-radius:8px;
-  padding:18px;
-  display:flex;
-  flex-direction:column;
-  gap:14px
-}
-.watch-card-top {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px
-}
-.watch-card-name {
-  font-weight:600;
-  font-size:14px;
-  display:flex;
-  align-items:center;
-  gap:10px
-}
-.watch-card-name .company-avatar {
-  width:35px;
-  height:35px;
-  font-size:11px
-}
-.watch-card p {
-  font-size:11px;
-  color:#91a17c;
-  line-height:1.7
-}
-.watch-card .watch-price {
-  font-size:22px;
-  letter-spacing:-.5px
-}
-.watch-card .watch-price small {
-  font-size:11px;
-  letter-spacing:0;
-  padding-left:8px
-}
-.watch-card-foot {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px
-}
 .history-table {
   width:100%;
   border-collapse:collapse;
@@ -1387,103 +1323,6 @@ h1>span {
   background:#edf1f7;
   border-color:#e4e8ef;
   color:#788ba7
-}
-.methodology-grid {
-  display:grid;
-  grid-template-columns:.9fr 1.3fr;
-  gap:24px
-}
-.methodology-intro {
-  padding:37px;
-  background:#eaf0e1;
-  border-color:#e0e8d5
-}
-.method-icon {
-  display:grid;
-  place-items:center;
-  width:46px;
-  height:46px;
-  border:1px solid #d0debd;
-  border-radius:12px;
-  color:#789960;
-  margin-bottom:32px
-}
-.method-icon svg {
-  width:25px;
-  height:25px
-}
-.methodology-intro h2 {
-  font-family:Georgia,"Times New Roman",serif;
-  font-size:40px;
-  line-height:1.13;
-  font-weight:400;
-  letter-spacing:-1.5px;
-  margin:12px 0 23px;
-  color:#3d603c
-}
-.methodology-intro p {
-  font-size:12px;
-  line-height:1.9;
-  color:#839572;
-  margin-bottom:17px
-}
-.methodology-intro strong {
-  font-weight:600;
-  color:#657e52
-}
-.methodology-intro .button {
-  margin-top:10px;
-  background:#f7faf0
-}
-.methodology-details {
-  display:flex;
-  flex-direction:column;
-  gap:14px
-}
-.method-card {
-  display:flex;
-  align-items:flex-start;
-  gap:18px;
-  padding:23px
-}
-.method-number {
-  font-family:Georgia,serif;
-  color:#a6b991;
-  font-size:22px
-}
-.method-card h3 {
-  font-size:14px;
-  color:#536e44
-}
-.method-card p {
-  font-size:11px;
-  line-height:1.85;
-  color:#97a389;
-  margin-top:9px
-}
-.indicator-reference {
-  padding:28px;
-  margin-top:24px
-}
-.indicator-reference h2 {
-  font-size:18px;
-  color:#4e6c41
-}
-.indicator-grid {
-  display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
-  gap:27px;
-  margin-top:25px
-}
-.indicator-grid h3 {
-  font-size:12px;
-  color:#748a61
-}
-.indicator-grid p {
-  font-size:11px;
-  line-height:1.9;
-  margin-top:8px;
-  color:#98a48b
 }
 .modal {
   padding:0;
@@ -2361,9 +2200,6 @@ h1>span {
   .demo-copy {
     display:none
   }
-  .watchlist-symbols {
-    grid-template-columns:repeat(2,minmax(0,1fr))
-  }
   .stats-grid {
     gap:12px
   }
@@ -2429,20 +2265,6 @@ h1>span {
   .stat-foot {
     font-size:8px
   }
-  .methodology-grid {
-    grid-template-columns:1fr 1.2fr;
-    gap:16px
-  }
-  .methodology-intro {
-    padding:27px
-  }
-  .method-card {
-    padding:19px;
-    gap:13px
-  }
-  .indicator-grid {
-    grid-template-columns:repeat(2,minmax(0,1fr))
-  }
 }
 @media(max-width:760px) {
   .sidebar {
@@ -2474,9 +2296,6 @@ h1>span {
   }
   .top-link {
     font-size:10px
-  }
-  .top-link[data-view=methodology] {
-    display:none
   }
   .brand {
     font-size:23px
@@ -2602,51 +2421,6 @@ h1>span {
     max-width:200px;
     text-align:right
   }
-  .watchlist-symbols {
-    padding:0 17px 17px;
-    gap:12px
-  }
-  .watch-card {
-    padding:15px
-  }
-  .watch-card-name {
-    font-size:13px;
-    gap:7px
-  }
-  .watch-card-name .company-avatar {
-    width:30px;
-    height:30px
-  }
-  .watch-price {
-    font-size:20px
-  }
-  .methodology-grid {
-    grid-template-columns:1fr
-  }
-  .methodology-intro {
-    padding:28px
-  }
-  .methodology-intro h2 {
-    font-size:36px
-  }
-  .methodology-intro h2 br {
-    display:none
-  }
-  .method-icon {
-    margin-bottom:22px
-  }
-  .methodology-details {
-    gap:12px
-  }
-  .method-card {
-    padding:21px
-  }
-  .methodology-intro p {
-    max-width:550px
-  }
-  .indicator-reference {
-    padding:23px
-  }
   .modal-header {
     padding:23px
   }
@@ -2769,14 +2543,6 @@ h1>span {
   }
   .top-link.active {
     display:block
-  }
-  .top-link[data-view=methodology].active {
-    display:block
-  }
-  .nav-count {
-    font-size:8px;
-    min-width:15px;
-    height:15px
   }
   .demo-banner {
     align-items:flex-start;
@@ -2979,42 +2745,6 @@ h1>span {
   .page-footer>span:last-child {
     text-align:left;
     max-width:none
-  }
-  .watchlist-symbols {
-    grid-template-columns:1fr;
-    padding:0 14px 14px
-  }
-  .watch-card {
-    padding:16px
-  }
-  .methodology-intro {
-    padding:25px
-  }
-  .methodology-intro h2 {
-    font-size:33px
-  }
-  .methodology-intro p {
-    font-size:11px
-  }
-  .method-card {
-    padding:20px 17px;
-    gap:11px
-  }
-  .method-card h3 {
-    font-size:12px
-  }
-  .method-card p {
-    font-size:10px
-  }
-  .indicator-grid {
-    grid-template-columns:1fr;
-    gap:23px
-  }
-  .indicator-reference {
-    padding:23px 20px
-  }
-  .indicator-reference h2 {
-    font-size:16px
   }
   .modal {
     width:calc(100vw - 20px);
