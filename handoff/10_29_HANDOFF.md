@@ -87,3 +87,83 @@ The scratchpad is not durable, so scripts, configs, reports and the 20-session c
 - **Replay approximations:** 1-minute closes as fills, bid = ask, no slippage, currently listed stocks only. The user's real entry on BURU was 2.3% worse than the alert price.
 - **Foreground `sleep` is blocked** in this harness; use Monitor or a background `until` loop.
 - **Position sizing:** the user put 62% of the account into one trade. The replay's base rate is negative, so flag sizing risk without lecturing.
+
+---
+
+# Discovery study handoff — October 29, 2026
+
+This section covers the offline discovery study (`nomisma/DISCOVERY_STUDY_SPEC.md`), separate from the live trading above. It brings `handoff/10_22_HANDOFF.md` up to date; that file's **Pitfalls** list still applies in full.
+
+## Start here
+
+- **Status:** data acquisition is complete, and the holdout is downloaded and **sealed**. Both studies concluded **"no edge found"**, so there are no finalists and the holdout stays closed.
+- **Running:** nothing. No `discovery_acquire.py` process is running.
+- **Next decision belongs to the user.** Should research continue at all? If yes, with which pre-registered third hypothesis? Ask with `/grill-me`: numbered questions, each with a recommended answer, then wait for answers.
+- **Relevance to live trading:** the user is now trading live alerts, which use a different rule set from the study's. The study's finding still applies: the gross drift of a breakout entry on sub-$10 stocks, about +1%, roughly equals a round trip's cost. Mention it if asked, without lecturing.
+
+## Locations
+
+| What | Where |
+|---|---|
+| Spec | `nomisma/DISCOVERY_STUDY_SPEC.md` in the main checkout. This is the most current copy (see the next row). |
+| Worktree copy | `/Users/barry/orca/workspaces/heuresis/Research_1`, branch `fantasybarry/Research_1`, at `93854b0`. Its spec **lacks the holdout-seal lines** added on 10/22 (main spec lines 218–222). Copy the main spec there before the next commit on that branch. |
+| Code | `nomisma/nomisma/discovery_data.py`, `discovery_signals.py`, `discovery_replay.py`, `tools/discovery_acquire.py` |
+| Tests | `nomisma/tests/test_discovery_data.py`: 8 tests, passing on 10/29 |
+| Data (gitignored) | `nomisma/data/discovery/`, 3.4 GB in total. `discovery/` holds results and raw data, `holdout/` holds sealed raw data, `reference/delisted` holds the delisted-ticker list. |
+| Logs | `data/discovery/step1.log`, `step3-2025-10.log`, `step5.log`, `spreads-2025-10.log` |
+| Pre-registration | `nomisma/HYPOTHESES`, with the second-study result in `data/discovery/discovery/hypotheses-2025-10_2026-09.json` |
+| Credentials | `nomisma/.env` holds `MASSIVE_API_KEY`, the free Basic plan key added 10/16. `run.py` whitelists it. Load it with `load_environment`. **Never print it.** |
+
+## Completed
+
+1. **Spec design (10/15–16).** The user and I worked through 20 `/grill-me` questions and rewrote the spec to match:
+   - Every opportunity is the unit of analysis.
+   - The universe includes delisted stocks.
+   - Four resistance arms: b3, b6, c and d.
+   - Data: Massive Basic for bars, Alpaca free SIP for quotes.
+   - Risk is 4.1% of session-open equity.
+   - At most 2 finalists, chosen by a fixed rule.
+   - A pilot go/no-go gate, and a sealed holdout.
+2. **Step 1, universe (10/16).**
+   - Unadjusted grouped daily bars plus monthly point-in-time ticker lists.
+   - Result: 251 sessions, 2,971 distinct tickers, 2,075 per day at the median (2,018–2,192), and 522,097 stock-days (`discovery/universe_summary.json`).
+   - Verified beforehand: as-of-date lists include stocks delisted later, and one page of the delisted list reaches back to January 2025.
+3. **Steps 2–6** were done in other sessions; results are in the files listed.
+   - **Delisted check:** 599 common stocks delisted during discovery, and all sampled ones have minute bars (`delisted_check.json`).
+   - **October 2025 pilot:** 191 bars per stock-day. The delisted share is 13–14%. Every arm projects far more than 600 opportunities a year (`pilot-2025-10-summary.json`).
+   - **Disk projection:** 51 GB, mostly quotes (`pilot-2025-10-disk.json`).
+   - **Replays, conditions, spreads and the second study:** see the spec's "Condition search", "Loss follow-up" and "Second study" sections, and `tally.txt`.
+4. **Holdout download and seal (10/22).**
+   - The download had died mid-August 2025 when a session ended. I resumed it and finished August and September.
+   - Every month is complete. Tickers per month: April 2,507, May 2,406, June 2,341, July 2,295, August 2,309, September 2,206.
+   - `manifest holdout` lists 14,231 files, with manifest SHA-256 `a770dd255cb035d347ac07f2e1ebce2df3f8fed10a03237edad48d29aa34a34b`. It's recorded in the spec.
+
+## Stuck or open
+
+1. **There's no direction for a third study.** It's the user's call.
+2. **Forward collection (October 2026 onward) is in the spec but not built.** No code collects it. Any future candidate needs it for confirmation.
+3. **Step 7, the full order-type replay with Alpaca quotes, never ran.** No arm survived step 6, so this is by design. Only spread samples exist (`spreads-*.json`, `alpaca-spreads/`).
+4. **Four `replay-v2-*-summary.json` files are still missing,** for October 2025–January 2026; 8 of 12 exist. Scoring doesn't need them.
+5. **The Massive API key was pasted into the 10/16 chat.** Suggest the user regenerate it on massive.com and update `.env`.
+
+## Next steps
+
+1. Start a `/grill-me` round on whether to continue, and if so, which entry hypothesis. The 10/22 conclusion was that any edge must come from the entry, since no exit created one.
+2. If continuing:
+   1. pre-register the hypothesis in `HYPOTHESES`, with its cohort, exit, costs and pass rules;
+   2. commit it in `Research_1`;
+   3. score it **once** on `replay-v2-*.csv.gz`.
+3. Only if something passes: build forward collection, then write a committed `FINALISTS` file before the holdout is read.
+4. Before the next commit in `Research_1`, sync the spec from main and commit the untracked `10_22_HANDOFF.md` there if the user wants it.
+
+## Pitfalls specific to this session
+
+- **Checking the seal overwrites the file list.** `discovery_acquire.py manifest holdout` **rewrites** `holdout/MANIFEST.json`. To check the seal, copy that file aside first, rerun, and compare the printed hash with the one in the spec. A mismatch means a holdout file changed.
+- **Prices stay unadjusted** everywhere (`adjusted=false`). Adjusted history rescales bars from before a reverse split, which breaks the $0.10–$10 filter.
+- **Massive Basic is slow and its history window slides.**
+  - The limit is 5 calls a minute. One month of minute bars takes about 8 hours.
+  - "Could not reach Massive after retries" happens now and then. Rerun the same command; it resumes, because a ticker counts as done only once its page-0 file exists.
+  - The free plan keeps a rolling 2-year history. The holdout rolls off around April 2027 and discovery around October 2027. Everything is already on disk, so **don't delete `data/discovery/`**.
+- **How the universe is built.** A ticker counts as common stock if its month's list or the next month's includes it, which catches mid-month listings. Grouped daily bars exclude OTC.
+- **Alpaca's free plan has gaps.** It returns no data for delisted symbols, and SIP requests must end at least 15 minutes in the past.
+- **Two sessions share the main checkout.** It also holds uncommitted live-trading work (see the live-trading section above), so don't commit or stash there. This discovery section was **appended** on 10/29; the live-trading section above belongs to another session and is untouched. Its pre-edit version is in commit `f252d5c`.
