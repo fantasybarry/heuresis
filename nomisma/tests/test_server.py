@@ -333,17 +333,17 @@ class DiscoveryScheduleTests(unittest.TestCase):
         self.assertIn("could not save", job["error"])
         self.assertIsNone(self.app.discovery_snapshot(self.now)["latest"])
 
-    def test_search_repeats_every_30_minutes_until_close_and_replaces_radar(self):
+    def test_search_repeats_every_5_minutes_until_close_and_replaces_radar(self):
         self.enable()
         job = self.start_due()
         with patch("nomisma.server.datetime", wraps=datetime) as clock:
             clock.now.return_value = self.now
             self.app._finish_research(job, result={"source": "demo", "rows": [{"symbol": "BBB"}, {"symbol": "AAA"}]})
         self.assertEqual(self.app.monitor.config["symbols"], ["BBB", "AAA"])
-        self.assertIsNone(self.app.discovery_due(self.now + timedelta(minutes=29)))
-        self.assertEqual(self.app.discovery_due(self.now + timedelta(minutes=30)), "2026-09-08")
+        self.assertIsNone(self.app.discovery_due(self.now + timedelta(minutes=4)))
+        self.assertEqual(self.app.discovery_due(self.now + timedelta(minutes=5)), "2026-09-08")
         state = self.app.store.get("discovery_state")
-        state["last_success_at"] = datetime(2026, 9, 8, 19, 45, tzinfo=timezone.utc).isoformat()  # 3:45 p.m. New York
+        state["last_success_at"] = datetime(2026, 9, 8, 19, 55, tzinfo=timezone.utc).isoformat()  # 3:55 p.m. New York
         self.app.store.set("discovery_state", state)
         self.assertIsNone(self.app.discovery_due(datetime(2026, 9, 8, 20, 30, tzinfo=timezone.utc)))
         self.app.monitor.status["running"] = True

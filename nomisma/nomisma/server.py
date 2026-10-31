@@ -25,7 +25,7 @@ from .research import default_discovery, validate_discovery
 
 LOGGER = logging.getLogger("nomisma")
 # After the day's first scheduled search, discovery repeats on this interval until the 4 p.m. close.
-DISCOVERY_REPEAT = timedelta(minutes=30)
+DISCOVERY_REPEAT = timedelta(minutes=5)
 STATIC = Path(__file__).parent / "static"
 MAX_BODY = 25 * 1024 * 1024
 MAX_BACKUP = 128 * 1024 * 1024
