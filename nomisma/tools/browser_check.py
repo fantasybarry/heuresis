@@ -166,6 +166,9 @@ def check_live(client, app, server_port, output, temporary):
     print("PASS intraday-first navigation, saved filters, explicit start, and running configuration lock")
 
     client.evaluate("document.querySelector('#live-table [data-live-symbol]').click()")
+    client.wait("document.querySelector('#live-table tr.live-selected') && document.querySelector('#live-focus .live-focus-checks') && document.querySelector('#live-focus svg')")
+    assert not client.evaluate("document.querySelector('#live-report-dialog').open")
+    client.evaluate("document.querySelector('#live-focus [data-live-report]').click()")
     client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-data svg')")
     assert client.evaluate("document.querySelectorAll('#live-history-details .live-history-table tbody tr').length === 30")
     assert client.evaluate("['Session volume','Float shares','30-session average volume','30-session total volume','Session relative volume','1-minute relative volume','Opening gap'].every(label => document.querySelector('#live-report-data').textContent.includes(label))")
@@ -180,8 +183,8 @@ def check_live(client, app, server_port, output, temporary):
     client.evaluate("document.body.classList.remove('printing-live-report'); document.querySelector('#live-report-dialog').close()")
     print("PASS stock metrics, 30-session history, price chart, and printable PDF report")
 
-    client.wait("document.querySelector('#live-alerts').textContent.includes('Buy setup')", seconds=20)
-    client.wait("document.querySelector('#live-alerts').textContent.includes('Strong buy setup')", seconds=20)
+    client.wait("document.querySelector('#live-alerts .live-badge.buy')", seconds=20)
+    client.wait("document.querySelector('#live-alerts .live-badge.strong')", seconds=20)
     levels = {item["level"] for item in app.store.monitor_alerts()}
     assert levels == {"Buy", "Strong buy"}
     assert len(app.store.monitor_alerts()) == 6
@@ -236,8 +239,8 @@ def check_live(client, app, server_port, output, temporary):
     app.monitor.save_config({"symbols": configured})
     print("PASS radar scan loads qualified candidates and starts the monitor")
 
-    client.wait("document.querySelectorAll('#live-table [data-live-candles]').length > 0")
-    client.evaluate("document.querySelector('#live-table [data-live-candles]').click()")
+    client.wait("document.querySelectorAll('#live-focus [data-live-candles]').length > 0")
+    client.evaluate("document.querySelector('#live-focus [data-live-candles]').click()")
     client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-dialog').classList.contains('candle-full')")
     client.evaluate("document.querySelector('[data-live-candle-full]').click()")
     client.wait("!document.querySelector('#live-report-dialog').open")
@@ -334,8 +337,10 @@ def check_metric_null_sorting(client, app):
         with patch.object(app.monitor, "snapshot", side_effect=serve_snapshot):
             client.call("Page.reload")
             client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === 4")
-            check_metric_columns(client, ".live-stocks")
             assert client.evaluate("!document.querySelector('#live-extra-columns').checked && !!document.querySelector('#live-ranking-note')")
+            assert client.evaluate("['day_volume','day_relative_volume','spread_pct'].every(metric => document.querySelector('.live-stocks td[data-metric=' + metric + ']')) && !document.querySelector('.live-stocks td[data-metric=beta]')")
+            client.evaluate("document.querySelector('#live-extra-columns').click()")
+            check_metric_columns(client, ".live-stocks")
             for metric in METRIC_SORT_FIELDS:
                 client.evaluate("document.querySelector('#live-sort').value = %s; document.querySelector('#live-sort').dispatchEvent(new Event('change'))" % json.dumps(metric))
                 actual = client.evaluate("Array.from(document.querySelectorAll('#live-table [data-live-symbol]'), field => field.dataset.liveSymbol)")
@@ -457,6 +462,8 @@ def check_workspace_improvements(client, app, output):
     client.evaluate("document.querySelector('#live-search').value = %s; document.querySelector('#live-search').dispatchEvent(new Event('input'))" % json.dumps(selected[0]))
     client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === 1")
     client.evaluate("document.querySelector('#live-search').value = ''; document.querySelector('#live-search').dispatchEvent(new Event('input')); document.querySelector('#live-table [data-live-symbol]').click()")
+    client.wait("document.querySelector('#live-focus [data-live-report]')")
+    client.evaluate("document.querySelector('#live-focus [data-live-report]').click()")
     client.wait("document.querySelector('#live-report-data svg') && document.querySelectorAll('#live-history-details tbody tr').length === 30")
     assert client.evaluate("!document.querySelector('#live-print').disabled")
     client.evaluate("document.querySelector('#live-report-dialog').close()")
@@ -607,7 +614,8 @@ def check_alert_source_isolation(client, app, output):
                     client.screenshot(output / 'alpaca-inbox-mixed-source-filtered.png')
 
                 client.evaluate("document.querySelector('#live-journal').click()")
-                client.wait("document.querySelectorAll('#live-journal-results [data-live-alert]').length === 6")
+                client.wait("location.hash === '#journal' && !document.querySelector('#journal-view').classList.contains('hidden') && document.querySelectorAll('#live-journal-results [data-live-alert]').length === 6")
+                assert client.evaluate("document.querySelector('#live-journal-stats').textContent.includes('Median 30-minute change')")
                 journal_ids = client.evaluate("Array.from(document.querySelectorAll('#live-journal-results [data-live-alert]'), el => el.dataset.liveAlert)")
                 assert set(journal_ids) == set(market_ids + demo_ids + ['source-demo-new', 'source-market-new'])
                 journal = client.evaluate("document.querySelector('#live-journal-results').textContent")

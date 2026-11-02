@@ -138,9 +138,10 @@ internal sealed class MainWindow : Form
         Item(file, "Exit", Close, Keys.Alt | Keys.F4);
         Item(view, "Reload workspace", () => { if (TrustedCurrent()) web.Reload(); }, Keys.Control | Keys.R);
         view.DropDownItems.Add(new ToolStripSeparator());
-        Item(view, "Live monitor", () => EvaluateTrusted("location.hash = 'live'"), Keys.Control | Keys.D1);
+        Item(view, "Radar", () => EvaluateTrusted("location.hash = 'live'"), Keys.Control | Keys.D1);
         Item(view, "Daily screener", () => EvaluateTrusted("location.hash = 'dashboard'"), Keys.Control | Keys.D2);
         Item(view, "Scan history", () => EvaluateTrusted("location.hash = 'history'"), Keys.Control | Keys.D3);
+        Item(view, "Journal", () => EvaluateTrusted("location.hash = 'journal'"), Keys.Control | Keys.D4);
         Item(help, "About Nomisma", () => MessageBox.Show(this,
             "Nomisma " + Application.ProductVersion.Split('+')[0] + "\nA local market research workspace by Heuresis.\n\nYour research data stays on this PC. Closing the app stops the local service it started, including live monitoring and scheduled scans.",
             "About Nomisma", MessageBoxButtons.OK, MessageBoxIcon.Information));

@@ -28,7 +28,7 @@
   const levelClass = (level) => level === "Strong buy" ? "strong" : level === "Buy" ? "buy" : "watch";
   const unavailable = "Unavailable: the provider has not supplied a usable value or enough history.";
   const view = {
-    snapshot:null, selected:null, sort:"day_volume", query:"", events:null, pollTimer:null,
+    snapshot:null, selected:null, sort:"signal_score", query:"", events:null, pollTimer:null,
     retryTimer:null, fetching:false, receivedAt:0, transport:"connecting", action:false,
     baseline:false, alertSource:null, seen:new Set(), freshSince:Date.now(), alertsKey:"", detailKey:"",
     notifications:false, notificationMessage:"", sound:false, audio:null, extraColumns:false,
@@ -37,10 +37,11 @@
     discoverySettings:null, discoveryStatus:null, discoveryResultId:null, discoveryPolling:false,
     discoveryTimer:null, manualDiscovery:false, scheduleBusy:false, discoveryLoading:false,
     selectedDetail:null, detailFetching:false, detailReceivedAt:0, tableKey:"", refreshing:false,
-    alertsRefreshing:false, alertRefreshMessage:"", candleTf:"5Min", candles:null, candleFetching:false, candleZoom:120, candleOffset:0, candleDrag:null, candleFull:false
+    alertsRefreshing:false, alertRefreshMessage:"", focus:null, focusDetail:null, focusFetching:false, focusTf:"1Min", focusCandles:null, pulse:null, pulseError:"", candleTf:"5Min", candles:null, candleFetching:false, candleZoom:120, candleOffset:0, candleDrag:null, candleFull:false
   };
   const candleFrames = [["1Min", "1m", 60e3], ["5Min", "5m", 300e3], ["15Min", "15m", 900e3], ["1Hour", "1h", 3600e3], ["1Day", "1D", 0]];
   const nyClock = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
+  const nySeconds = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23"});
   const sessionFill = {pre:"#d6e4f5", post:"#f6dfbf"}, sessionName = {pre:"Pre-market", post:"After-hours"};
   // Intraday bars are labeled by their start time in New York: before 9:30 is pre-market, 16:00 on is after-hours.
   const barSession = (t) => { const [h, m] = nyClock.format(new Date(t)).split(":").map(Number); return h * 60 + m < 570 ? "pre" : h >= 16 ? "post" : ""; };
@@ -77,26 +78,19 @@
     q("#live-view").innerHTML = `
       <div id="live-error" class="alert error hidden" role="alert"></div>
       <div id="live-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
-      <section class="live-command" aria-label="Monitor controls">
-        <div class="live-command-status"><span class="live-state-dot" id="live-state-dot"></span><div><strong id="live-connection">Loading monitor</strong><span id="live-status-message">Reading your saved configuration…</span></div></div>
-        <div class="live-command-actions"><button class="button subtle" id="live-refresh" disabled title="Reload all monitored quotes, history, volume baselines, and saved setup alerts">Refresh data</button><button class="button subtle" id="live-diagnostics">Test connection</button><button class="button subtle" id="live-discover">Find candidates</button><button class="button subtle" id="live-config" disabled>Configure monitor</button><button class="button subtle hidden" id="live-stop">Stop monitor</button><button class="button primary" id="live-start" disabled><span aria-hidden="true">▶</span> Start monitor</button></div>
-      </section>
-      <div class="live-session-tools"><p id="live-refresh-status" role="status">Live prices update automatically while monitoring.</p><button class="text-button" id="live-schedule-open">Schedule candidate searches</button><button class="text-button" type="button" data-planner-settings>Model &amp; sizing settings</button><span id="live-schedule-summary" role="status">Loading schedule…</span></div>
-      <div id="live-source-banner" class="live-source-banner" role="status"></div>
-      <div id="live-warnings" class="live-warnings hidden"></div>
-      <div class="live-overview" id="live-overview"></div>
+      <section class="live-pulse" aria-labelledby="live-pulse-title"><div class="live-pulse-heading"><h2 id="live-pulse-title">Market pulse</h2><span id="live-pulse-summary"></span><small id="live-pulse-note">Loading index ETFs and market movers…</small></div><div id="live-pulse"></div></section>
       <div class="live-workspace">
-        <section class="panel live-market-panel" aria-labelledby="live-radar-title">
-          <div class="live-panel-heading"><div><div class="section-heading"><h2 id="live-radar-title">Momentum radar</h2><span class="count-pill" id="live-symbol-count">0</span></div><p id="live-filter-summary">Your intraday rules, in real time.</p></div><div class="live-radar-actions"><button class="button subtle" id="live-export" disabled>Export CSV</button><button class="button primary" id="live-scan" title="Run your saved candidate search and load the matching stocks into the radar">Scan now</button></div></div>
-          <div class="live-table-toolbar"><label class="live-search"><span class="sr-only">Search monitored stocks</span><input id="live-search" type="search" placeholder="Search your symbols…"></label><label class="live-sort">Sort by<select id="live-sort">${sortOptions([["signal_score","Setup score"],["minute_relative_volume","1-minute RVOL"],["gap_pct","Opening gap"],["session_volume","Regular-session volume"],["symbol","Symbol A–Z"]])}</select></label></div>
-          <label class="live-columns"><input type="checkbox" id="live-extra-columns"> Show technical setup, float & regular-session columns</label>
-          <p id="live-ranking-note" class="live-ranking-note">Highest to lowest · total day volume includes premarket · scroll the table to inspect every metric</p><div id="live-table" class="live-table-scroll" tabindex="0" aria-label="Live stock metrics"></div>
-          <div class="live-table-footer"><span id="live-update-time">Waiting for your first session</span><span>Technicals use completed 1-minute bars</span></div>
+        <section class="live-market-panel" aria-labelledby="live-radar-title">
+          <div class="live-panel-heading"><div><h2 id="live-radar-title">Momentum radar</h2><p id="live-radar-summary">Your intraday rules, in real time.</p></div><div class="live-radar-actions"><label class="live-search"><span class="sr-only">Search radar symbols</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="live-search" type="search" placeholder="Symbol"></label><label class="live-sort"><span>Sort</span><select id="live-sort">${sortOptions([["signal_score","Setup score"],["minute_relative_volume","1-minute RVOL"],["change_pct","Day change"],["gap_pct","Opening gap"],["session_volume","Regular-session volume"],["symbol","Symbol A–Z"]])}</select></label></div></div>
+          <div class="live-rule-chips"><span id="live-filter-summary"></span><button type="button" class="text-button" id="live-edit-rules">Edit rules</button></div>
+          <div id="live-table" class="live-table-scroll" tabindex="0" aria-label="Live stock metrics"></div>
+          <div class="live-table-footer"><span id="live-ranking-note">Auto-scan replaces the radar every 5 minutes until the 4:00 p.m. close.</span><span>Technicals use completed 1-minute bars · total day volume includes premarket</span></div>
+          <div id="live-warnings" class="live-warnings hidden"></div>
           <details class="live-definitions"><summary>Read the numbers</summary><div><p><strong>Total day volume</strong> includes the provider’s available premarket and regular-session trading; it continues through available after-hours trading. It does not reset at the opening bell. Volumes reflect the selected feed’s coverage.</p><p><strong>Average volume (3M)</strong> uses 63 prior trading sessions. <strong>Average daily volume (20D)</strong> uses 20 prior sessions. Both exclude today. <strong>Day RVOL</strong> is total day volume ÷ the 20-session average; it is not adjusted for time of day.</p><p><strong>Bid–ask spread</strong> shows ask minus bid in dollars and as a percentage of their midpoint. A narrower spread earns more liquidity points. Quotes older than 30 seconds are unavailable for screening.</p><p><strong>Beta</strong> estimates sensitivity to SPY using up to 252 paired daily price returns, with at least 60 required. <strong>ATR (14)</strong> uses Wilder’s average true range of completed daily bars. ATR% divides it by the prior close so different stock prices can be compared.</p><p><strong>Regular-session volume and VWAP</strong> use completed regular-session minutes. <strong>1-minute RVOL</strong> is the latest completed minute’s volume ÷ the preceding 20-minute average and drives the minute-volume alert filter.</p><p><strong>30D avg / total</strong> use 30 prior sessions. <strong>Session RVOL</strong> compares regular-session volume with that full-session average. <strong>Gap</strong> compares the regular-session opening price with the prior adjusted close. <strong>Float</strong> is sourced and dated separately. A dash means unavailable.</p></div></details>
         </section>
-        <aside class="live-alert-rail" aria-label="Technical setup alerts">
-          <section class="panel live-alert-panel"><div class="live-panel-heading"><div><div class="section-heading"><h2>Setup alerts</h2><span id="live-alert-count" class="count-pill">0</span></div><p>Confirmed moves worth a closer look.</p></div><div class="live-alert-actions"><button class="text-button" id="live-alert-refresh" type="button" disabled aria-label="Refresh setup alerts" aria-busy="false">Refresh</button><button class="text-button" id="live-ack-all" disabled>Mark read</button></div></div><div class="live-alert-options"><button class="live-option" id="live-notifications" aria-pressed="false">Desktop alerts <span>Off</span></button><button class="live-option" id="live-sound" aria-pressed="false">Alert sound <span>Off</span></button><p id="live-notification-note">Loading alert preferences…</p></div><p id="live-alert-refresh-status" class="live-alert-refresh-status" role="status" aria-live="polite">Saved setups retain their original price and score.</p><div id="live-alerts" class="live-alert-list" aria-label="Recent saved alerts"></div><div class="live-journal-link"><button class="button subtle" id="live-journal">Open research journal</button></div></section>
-          <section class="live-rule-note"><span class="live-rule-mark" aria-hidden="true">↗</span><h3>Evidence before action.</h3><p>Buy and Strong buy describe technical setups, not orders or a probability of profit. Open a stock to inspect its score and data quality.</p><div id="live-alert-rules"></div><p class="live-note-small">Regular-session alerts require fresh trades, quotes, and completed minute bars. Feed outages, missing data, and stale prices suppress alerts. Halt detection is not guaranteed.</p></section>
+        <aside class="live-alert-rail" aria-label="Selected stock and setup alerts">
+          <section class="live-focus" id="live-focus" aria-label="Selected stock"></section>
+          <section class="live-alert-panel" aria-labelledby="live-alerts-title"><div class="live-alert-head"><div><h2 id="live-alerts-title">Setup alerts</h2><span class="live-new-pill"><span id="live-alert-count">0</span> new</span></div><div class="live-alert-actions"><button class="text-button" id="live-alert-refresh" type="button" disabled aria-label="Refresh setup alerts" aria-busy="false">Refresh</button><button class="text-button" id="live-ack-all" disabled>Mark read</button></div></div><div id="live-alerts" class="live-alert-list" aria-label="Recent saved alerts"></div><p id="live-alert-refresh-status" class="live-alert-note" role="status" aria-live="polite">Saved setups retain their original price and score.</p><p class="live-alert-note">Buy and Strong buy describe technical setups, not orders or a probability of profit. <button class="text-button" id="live-journal" type="button">Open journal</button></p></section>
         </aside>
       </div>`;
 
@@ -117,9 +111,9 @@
     document.body.insertAdjacentHTML("beforeend", [
       dialog("live-diagnostics-dialog", "Market data diagnostics", "Test authentication, feed access, subscriptions, and data readiness.", '<p id="live-diagnostics-progress" class="live-form-note" role="status"></p><div id="live-diagnostics-error" class="alert error hidden" role="alert"></div><div id="live-diagnostics-result"></div>', '<span class="field-help">A test uses your current saved monitor source and symbols.</span><button id="live-retest" class="button primary">Run test again</button>'),
       dialog("live-discovery-dialog", "Find intraday candidates", "Find the highest-volume stocks for your radar.", `<form id="live-discovery-form"><fieldset id="live-discovery-fields"><div class="live-form-grid"><label>Source<select name="source" id="live-discovery-source"><option value="demo">Synthetic demo</option><option value="alpaca">Alpaca</option></select></label><label>Universe<select name="universe" id="live-discovery-universe"><option value="curated">Liquid US stocks · starter list</option><option value="all">All verified US-listed stocks</option><option value="custom">Custom symbols</option></select></label></div><label id="live-discovery-custom" class="hidden">Symbols<textarea name="symbols" rows="2" placeholder="AAPL, NVDA, SOFI"></textarea></label><div class="live-form-grid"><label>Minimum price ($)<input name="min_price" type="number" min="0" step="any" value="0" required></label><label>Maximum price ($)<input name="max_price" type="number" min="0.0001" step="any" value="1000" required></label><label>Minimum regular-session volume<input name="min_day_volume" type="number" min="0" step="1" value="0" required></label><label>Minimum day change (%)<input name="min_change_pct" type="number" min="-100" step="any" value="-100" required></label><label>Maximum candidates<input name="limit" type="number" min="1" max="500" step="1" value="100" required></label></div><p class="field-help">Lenient filters keep symbols available for comparison. The volume minimum counts regular-session trading from 9:30 a.m. ET; premarket is excluded. Results are ranked by total day volume, highest first.</p><button type="submit" class="button primary">Find candidates</button></fieldset></form><section class="live-schedule-card" aria-labelledby="live-schedule-title"><div><h3 id="live-schedule-title">Scheduled candidate search</h3><p>Use the source, universe, and filters above. Repeats every 5 minutes until the 4 p.m. close.</p></div><form id="live-schedule-form"><label class="live-check"><input id="live-schedule-enabled" type="checkbox">Search automatically on weekdays</label><div class="live-schedule-controls"><label>New York time<input id="live-schedule-time" type="time" value="09:15" required></label><button id="live-save-schedule" class="button subtle" type="submit">Save schedule & filters</button></div><p id="live-schedule-status" class="field-help" role="status"></p><p class="field-help">Keep Nomisma open and your computer awake. New York time follows daylight saving time. Each completed search replaces the radar with its top 50 stocks and restarts an active monitor.</p><div id="live-schedule-error" class="alert error hidden" role="alert"></div></form></section><p id="live-discovery-progress" class="live-form-note hidden" role="status"></p><div id="live-discovery-error" class="alert error hidden" role="alert"></div><div id="live-discovery-result"></div>`, '<span id="live-candidate-selection" class="field-help" role="status">Choose up to 50 candidates.</span><button id="live-use-candidates" class="button primary" disabled>Save selected symbols</button>'),
-      dialog("live-journal-dialog", "Alert research journal", "Revisit each alert’s saved evidence and observed price outcomes.", '<div id="live-journal-error" class="alert error hidden" role="alert"></div><div id="live-journal-results"></div>', '<span id="live-journal-page" class="field-help" role="status"></span><div><button id="live-journal-prev" class="button subtle">Previous</button><button id="live-journal-next" class="button subtle">Next</button></div>'),
       dialog("live-evidence-dialog", "Saved alert evidence", "Original settings and market data are preserved at the time of the alert.", '<div id="live-evidence-error" class="alert error hidden" role="alert"></div><div id="live-evidence-result"></div>', '<span class="field-help">Outcomes are observed market prices, not simulated fills.</span><button id="live-evidence-refresh" class="button subtle">Refresh outcomes</button>')
     ].join(""));
+    q("#journal-view").innerHTML = `<section class="panel live-journal-panel"><div id="live-journal-error" class="alert error hidden" role="alert"></div><dl id="live-journal-stats" class="live-journal-stats"></dl><div id="live-journal-results"></div><div class="table-footer"><span id="live-journal-page" role="status"></span><div class="history-page-actions"><button id="live-journal-prev" class="button subtle">Previous</button><button id="live-journal-next" class="button subtle">Next</button></div></div></section>`;
   }
   async function researchJob(path, body, onProgress) {
     let {job} = await api(path, body);
@@ -159,20 +153,25 @@
     if (payload.universe === "custom" && !payload.symbols.length) throw new Error("Enter at least one symbol for a custom universe.");
     return payload;
   }
-  function screeningHeaders() {
-    return `<th class="live-num" title="Includes available premarket trading; does not reset at the open">Total day vol.</th><th class="live-num" title="63 prior trading sessions, excluding today">Avg vol (3M)</th><th class="live-num" title="20 prior trading sessions, excluding today">Avg daily vol (20D)</th><th class="live-num" title="Total day volume divided by 20-session average; not time adjusted">Day RVOL</th><th class="live-num">Bid–ask spread</th><th class="live-num" title="Up to 252 daily price returns vs SPY; minimum 60 paired observations">Beta</th><th class="live-num" title="Wilder 14-session average true range, in dollars and percent of prior close">ATR (14)</th>`;
+  const screeningKeys = ["day_volume", "avg_volume_3m", "avg_daily_volume", "day_relative_volume", "spread_pct", "beta", "atr"];
+  function screeningHeaders(keys = screeningKeys) {
+    const headers = {day_volume:'<th class="live-num" title="Includes available premarket trading; does not reset at the open">Total day vol.</th>', avg_volume_3m:'<th class="live-num" title="63 prior trading sessions, excluding today">Avg vol (3M)</th>', avg_daily_volume:'<th class="live-num" title="20 prior trading sessions, excluding today">Avg daily vol (20D)</th>', day_relative_volume:'<th class="live-num" title="Total day volume divided by 20-session average; not time adjusted">Day RVOL</th>', spread_pct:'<th class="live-num">Bid–ask spread</th>', beta:'<th class="live-num" title="Up to 252 daily price returns vs SPY; minimum 60 paired observations">Beta</th>', atr:'<th class="live-num" title="Wilder 14-session average true range, in dollars and percent of prior close">ATR (14)</th>'};
+    return keys.map((key) => headers[key]).join("");
   }
-  function screeningCells(row) {
+  function screeningCells(row, keys = screeningKeys) {
     const cell = (key, label, content, title) => `<td class="live-num" data-metric="${key}" data-label="${label}" title="${escapeHTML(numeric(row[key]) ? title : unavailable)}">${content}</td>`;
     const volumeNote = row.day_volume_fresh === false && numeric(row.day_volume) ? "Stale volume" : row.volume_partial || row.day_volume_partial ? "Partial volume" : "";
     const volumeTitle = `Includes available premarket volume: ${n(row.day_volume)} shares.${row.day_volume_fresh === false ? " Stale volume earns no volume or day RVOL ranking points." : ""}${row.volume_basis === "completed_extended_minutes" ? ` Completed minutes through ${clock(row.volume_at)}; partial total may undercount.` : ""}`;
-    return cell("day_volume", "Total day volume", `${short(row.day_volume)}${volumeNote ? `<small>${volumeNote}</small>` : ""}`, volumeTitle)
-      + cell("avg_volume_3m", "Avg vol (3M)", short(row.avg_volume_3m), `63 prior sessions: ${n(row.avg_volume_3m)} shares/day`)
-      + cell("avg_daily_volume", "Avg daily vol (20D)", short(row.avg_daily_volume), `20 prior sessions: ${n(row.avg_daily_volume)} shares/day`)
-      + cell("day_relative_volume", "Day RVOL", ratio(row.day_relative_volume), `Total day volume / 20-session average: ${ratio(row.day_relative_volume)}; not time adjusted`)
-      + cell("spread_pct", "Bid–ask spread", `${dollars(row.spread)}<small>${numeric(row.spread_pct) ? n(row.spread_pct, 2) + "%" : "—"}</small>`, `Ask minus bid; ${n(row.spread_pct, 4)}% of midpoint; quote ${clock(row.quote_at)}`)
-      + cell("beta", "Beta vs SPY", n(row.beta, 2), `Daily price-return beta vs SPY, ${n(row.beta_observations)} paired returns`)
-      + cell("atr", "ATR (14)", `${dollars(row.atr)}<small data-metric="atr_pct">${numeric(row.atr_pct) ? n(row.atr_pct, 2) + "%" : "—"}</small>`, `Wilder ATR14; ${n(row.atr_pct, 2)}% of prior close`);
+    const cells = {
+      day_volume: () => cell("day_volume", "Total day volume", `${short(row.day_volume)}${volumeNote ? `<small>${volumeNote}</small>` : ""}`, volumeTitle),
+      avg_volume_3m: () => cell("avg_volume_3m", "Avg vol (3M)", short(row.avg_volume_3m), `63 prior sessions: ${n(row.avg_volume_3m)} shares/day`),
+      avg_daily_volume: () => cell("avg_daily_volume", "Avg daily vol (20D)", short(row.avg_daily_volume), `20 prior sessions: ${n(row.avg_daily_volume)} shares/day`),
+      day_relative_volume: () => cell("day_relative_volume", "Day RVOL", ratio(row.day_relative_volume), `Total day volume / 20-session average: ${ratio(row.day_relative_volume)}; not time adjusted`),
+      spread_pct: () => cell("spread_pct", "Bid–ask spread", `${dollars(row.spread)}<small>${numeric(row.spread_pct) ? n(row.spread_pct, 2) + "%" : "—"}</small>`, `Ask minus bid; ${n(row.spread_pct, 4)}% of midpoint; quote ${clock(row.quote_at)}`),
+      beta: () => cell("beta", "Beta vs SPY", n(row.beta, 2), `Daily price-return beta vs SPY, ${n(row.beta_observations)} paired returns`),
+      atr: () => cell("atr", "ATR (14)", `${dollars(row.atr)}<small data-metric="atr_pct">${numeric(row.atr_pct) ? n(row.atr_pct, 2) + "%" : "—"}</small>`, `Wilder ATR14; ${n(row.atr_pct, 2)}% of prior close`)
+    };
+    return keys.map((key) => cells[key]()).join("");
   }
   function renderCandidateTable() {
     const rows = [...(view.discovery?.rows || [])].sort(compareRows(view.candidateSort));
@@ -361,7 +360,18 @@
     try {
       const data = await api(`/api/monitor/alerts?limit=${view.journal.limit}&offset=${Math.max(0, offset)}`);
       Object.assign(view.journal, data);
-      q("#live-journal-results").innerHTML = !data.alerts.length ? '<div class="live-alert-empty"><h3>No saved alerts yet</h3><p>Confirmed setups will preserve their original settings, data, and chart here.</p></div>' : `<div class="live-table-scroll"><table class="live-history-table"><thead><tr><th>Alert / source</th><th>Signal minute (ET)</th><th>Score</th><th>5m change</th><th>15m change</th><th>30m change</th></tr></thead><tbody>${data.alerts.map((alert) => `<tr><td><button class="text-button" data-live-alert="${escapeHTML(alert.id)}">${escapeHTML(alert.symbol)} · ${setup(alert.level)}</button><small>${escapeHTML(sourceLabel(alert.source, alert.feed))}</small></td><td>${clock(alert.market_time || alert.created_at, true)}</td><td>${n(alert.score)}/100</td>${[5,15,30].map((minute) => { const outcome = alert.outcomes?.[minute]; return `<td class="${direction(outcome?.close_change_pct)}">${outcome?.status === "observed" ? pct(outcome.close_change_pct) : escapeHTML(outcome?.status || "Unavailable")}</td>`; }).join("")}</tr>`).join("")}</tbody></table></div><p class="field-help">Click an alert for its frozen setup, settings, chart and adverse price movement. Outcomes compare completed minute bars with the original signal-bar close.</p>`;
+      // Summaries cover this page's finished 30-minute windows only.
+      const finished = data.alerts.map((alert) => alert.outcomes?.[30]).filter((outcome) => outcome?.status === "observed");
+      const changes = finished.map((outcome) => outcome.close_change_pct).filter(numeric).sort((a, b) => a - b);
+      const dips = finished.map((outcome) => outcome.adverse_excursion_pct).filter(numeric);
+      const middle = changes.length / 2, median = changes.length ? (changes.length % 2 ? changes[Math.floor(middle)] : (changes[middle - 1] + changes[middle]) / 2) : null;
+      q("#live-journal-stats").innerHTML = data.alerts.length ? [
+        ["Alerts on this page", n(data.alerts.length), `${n(data.total)} saved in all`],
+        ["Median 30-minute change", pct(median), `${n(changes.length)} with a finished 30-minute window`],
+        ["Up after 30 minutes", changes.length ? `${n(changes.filter((value) => value > 0).length)} of ${n(changes.length)}` : "—", "Close above the signal-minute close"],
+        ["Average worst dip", pct(dips.length ? dips.reduce((sum, value) => sum + value, 0) / dips.length : null), "Lowest low within 30 minutes"]
+      ].map(([label, value, note]) => `<div><dt>${label}</dt><dd>${value}</dd><small>${escapeHTML(note)}</small></div>`).join("") : "";
+      q("#live-journal-results").innerHTML = !data.alerts.length ? '<div class="live-alert-empty"><h3>No saved alerts yet</h3><p>Confirmed setups will preserve their original settings, data, and chart here.</p></div>' : `<div class="live-table-scroll"><table class="live-history-table"><thead><tr><th>Alert / source</th><th>Signal minute (ET)</th><th class="live-num">Score</th><th class="live-num">Signal price</th><th class="live-num">5 min</th><th class="live-num">15 min</th><th class="live-num">30 min</th><th class="live-num">Worst dip (30 min)</th></tr></thead><tbody>${data.alerts.map((alert) => { const dip = alert.outcomes?.[30]; return `<tr><td><button class="text-button" data-live-alert="${escapeHTML(alert.id)}">${escapeHTML(alert.symbol)} · ${setup(alert.level)}</button><small>${escapeHTML(sourceLabel(alert.source, alert.feed))}</small></td><td>${clock(alert.market_time || alert.created_at, true)}</td><td class="live-num">${n(alert.score)}/100</td><td class="live-num">${dollars(alert.price)}</td>${[5,15,30].map((minute) => { const outcome = alert.outcomes?.[minute]; return `<td class="live-num ${direction(outcome?.close_change_pct)}">${outcome?.status === "observed" ? pct(outcome.close_change_pct) : escapeHTML(outcome?.status || "Unavailable")}</td>`; }).join("")}<td class="live-num ${direction(dip?.adverse_excursion_pct)}">${dip?.status === "observed" ? pct(dip.adverse_excursion_pct) : "—"}</td></tr>`; }).join("")}</tbody></table></div><p class="field-help">Observed price changes, not fills, trades or profits. Click an alert for its frozen setup, settings and chart. Outcomes compare completed minute bars with the original signal-bar close.</p>`;
     } catch (error) { showError("#live-journal-error", error.message); }
     finally {
       const page = view.journal;
@@ -423,7 +433,7 @@
     q("#live-config").disabled = view.action;
     q("#live-discover").disabled = view.action;
     q("#live-scan").disabled = view.action || view.discoveryBusy || !!view.discoveryStatus?.running;
-    q("#live-scan").textContent = view.discoveryBusy || view.discoveryStatus?.running ? "Scanning…" : "Scan now";
+    q("#live-scan span").textContent = view.discoveryBusy || view.discoveryStatus?.running ? "Scanning…" : "Scan now";
     const refreshing = status.refresh?.state === "loading" || view.refreshing;
     const refreshAvailable = !!status.refresh;
     q("#live-refresh").disabled = !refreshAvailable || view.action || refreshing || view.alertsRefreshing || !running || !["live", "demo"].includes(status.connection);
@@ -442,27 +452,19 @@
     q("#live-config-running").classList.toggle("hidden", !running);
     const demo = (status.source || config.source) === "demo";
     const feed = status.feed || view.snapshot.provider_status?.feed;
-    const banner = q("#live-source-banner");
-    banner.classList.toggle("synthetic", demo);
-    replaceMarkup("#live-source-banner", demo
-      ? `<span class="live-source-tag">SYNTHETIC DEMO</span><p>Simulated penny stocks on a historical clock. Prices, float, volume, and alerts are fictional. <strong>Switch to Alpaca for market data.</strong></p>`
-      : `<span class="live-source-tag">${escapeHTML(sourceLabel("alpaca", feed))}</span><p>${feed === "iex" ? "IEX covers one exchange: volume and relative volume do not represent the consolidated market." : "Prices and quotes stream from your configured real-time market feed."} Alerts run during the regular trading session.</p>`);
+    // A streaming monitor shows its source and data time; otherwise its status message explains what to do next.
+    const streaming = ["live", "demo"].includes(status.connection) && !status.error && !!status.updated_at;
+    q("#live-status-message").classList.toggle("hidden", streaming);
+    q("#live-update-time").classList.toggle("hidden", !streaming);
+    q("#live-update-time").title = demo ? "Simulated penny stocks on a historical clock. Prices, float, volume, and alerts are fictional." : feed === "iex" ? "IEX covers one exchange: volume and relative volume do not represent the consolidated market." : "Prices and quotes stream from your configured real-time market feed.";
     const warnings = [...new Set(status.warnings || [])];
     q("#live-warnings").classList.toggle("hidden", !warnings.length);
     replaceMarkup("#live-warnings", warnings.length ? `<details><summary>${warnings.length} market data ${warnings.length === 1 ? "note" : "notes"}</summary><ul>${warnings.map((warning) => `<li>${escapeHTML(warning)}</li>`).join("")}</ul></details>` : "");
     const setups = rows.filter((row) => row.signal === "Buy" || row.signal === "Strong buy");
     const strong = rows.filter((row) => row.signal === "Strong buy").length;
-    const minuteValues = rows.map((row) => row.minute_relative_volume).filter(numeric);
-    const bestVolume = minuteValues.length ? Math.max(...minuteValues) : null;
-    q("#live-overview").innerHTML = [
-      ["Symbols on your radar", String(rows.length || 0), `${config.symbols.length} configured · up to ${symbolLimit()}`, ""],
-      ["Bullish technical setups", String(setups.length), `${strong} strong buy · confirmation required for alerts`, "highlight"],
-      ["Highest 1-minute RVOL", ratio(bestVolume), "Against the preceding 20 completed minutes", ""],
-      ["Trading session", status.session?.date || "Not started", demo ? "Historical simulation · explicitly synthetic" : rows.some((row) => row.market_open) ? "Regular session · market clock ET" : "Waiting / outside regular session", "session"]
-    ].map(([label, value, caption, className]) => `<article class="live-stat ${className}"><span>${label}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(caption)}</small></article>`).join("");
-    q("#live-symbol-count").textContent = rows.length;
-    q("#live-filter-summary").textContent = `${dollars(config.min_price)}–${dollars(config.max_price)} · regular-session volume ≥ ${short(config.min_session_volume)}`;
-    q("#live-alert-rules").innerHTML = `<div><span>Buy / strong buy</span><strong>${n(config.buy_score)} / ${n(config.strong_buy_score)} pts</strong></div><div><span>Confirmation</span><strong>${n(config.confirmation_bars)} minute bars</strong></div><div><span>Repeat cooldown</span><strong>${n(config.cooldown_seconds)} seconds</strong></div><div><span>Saved alerts</span><strong>${config.alerts_enabled ? "Enabled" : "Disabled"}</strong></div>`;
+    const lastScan = view.discoveryStatus?.last_run?.completed_at;
+    q("#live-radar-summary").textContent = `${n(rows.length)} ${rows.length === 1 ? "symbol" : "symbols"} · ${n(setups.length)} ${setups.length === 1 ? "setup" : "setups"} · ${n(strong)} strong buy${lastScan ? ` · last scan ${nyClock.format(new Date(lastScan))} ET` : ""}${demo ? " · synthetic demo" : ""}`;
+    replaceMarkup("#live-filter-summary", [`$${n(config.min_price, 2)}–$${n(config.max_price, 2)}`, `Session vol ≥ ${short(config.min_session_volume)}`, `Buy ≥ ${n(config.buy_score)} · Strong ≥ ${n(config.strong_buy_score)}`, `${n(config.confirmation_bars)} confirmation ${config.confirmation_bars === 1 ? "bar" : "bars"}`, ...(config.alerts_enabled ? [] : ["Alerts off"])].map((text) => `<span class="live-chip">${escapeHTML(text)}</span>`).join(""));
     q("#live-alert-count").textContent = alerts.filter((item) => !item.acknowledged).length;
     q("#live-ack-all").disabled = !alerts.some((item) => !item.acknowledged);
     const alertsRefreshing = view.alertsRefreshing || view.refreshing;
@@ -472,7 +474,7 @@
     q("#live-alert-refresh-status").textContent = alertsRefreshing
       ? "Refreshing saved setup alerts…"
       : view.alertRefreshMessage || "Saved setups retain their original price and score.";
-    renderTable(); renderAlerts(); renderNotificationNote(); renderFreshness();
+    renderTable(); renderFocus(); renderAlerts(); renderNotificationNote(); renderFreshness();
     if (q("#live-discovery-dialog").open) candidateSelection();
     if (q("#live-report-dialog").open) fetchSelectedDetail();
   }
@@ -489,17 +491,31 @@
     const bars = confirmation.bars || 0;
     const progress = `${n(Math.min(bars, required))} of ${n(required)} confirmation bars`;
     const cooldown = confirmation.cooldown_remaining_seconds > 0 ? ` · ${n(Math.ceil(confirmation.cooldown_remaining_seconds))}s cooldown` : "";
-    return `<strong class="${blocker ? "live-blocked-label" : "positive"}">${escapeHTML(blocker || (confirmation.confirmed ? "Confirmed setup" : row.alert_eligible ? "Conditions pass" : "Not eligible"))}</strong><small>${escapeHTML(progress + cooldown)}</small>`;
+    const dots = `<span class="live-dots" aria-hidden="true">${Array.from({length:required}, (_, i) => `<i class="${i < bars ? "on" : ""}"></i>`).join("")}</span>`;
+    return `<strong class="${blocker ? "live-blocked-label" : "positive"}">${escapeHTML(blocker || (confirmation.confirmed ? "Confirmed setup" : row.alert_eligible ? "Conditions pass" : "Not eligible"))}</strong><small>${dots}${escapeHTML(progress + cooldown)}</small>`;
   }
+  const badge = (level) => `<span class="live-badge ${levelClass(level)}">${level === "Strong buy" || level === "Buy" ? level : "No setup"}</span>`;
+  const pct1 = (value) => numeric(value) ? `${value > 0 ? "+" : value < 0 ? "−" : ""}${n(Math.abs(value), 1)}%` : "—";
+  const ratio1 = (value) => numeric(value) ? `${n(value, 1)}×` : "—";
+  const scoreBar = (score) => `<span class="live-score-bar" aria-hidden="true"><span class="${score >= 80 ? "high" : score >= 60 ? "" : "low"}" style="width:${numeric(score) ? Math.max(0, Math.min(100, score)) : 0}%"></span></span>`;
   function stockRow(row, config) {
     const symbol = escapeHTML(row.symbol);
     const volumeClass = numeric(row.minute_relative_volume) && row.minute_relative_volume >= 1.5 ? "live-volume-active" : "";
-    return `<tr class="${row.stale ? "live-stale" : ""}">
+    const minuteCell = metricCell(row.minute_relative_volume, ratio(row.minute_relative_volume), "1-minute RVOL", volumeClass);
+    const selected = row.symbol === view.focus ? " live-selected" : "";
+    if (!view.extraColumns) return `<tr class="${row.stale ? "live-stale" : ""}${selected}">
+      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Select ${symbol}"><span class="live-symbol">${symbol}${row.stale ? '<span class="live-row-dot stale" title="Stale or unavailable market data"></span>' : ""}</span>${badge(row.signal)}</button></td>
+      <td class="live-num" data-label="Price / day"><strong>${dollars(row.price)}</strong><small class="${direction(row.change_pct)}">${pct1(row.change_pct)}</small></td>
+      ${screeningCells(row, ["day_volume"])}<td class="live-num" data-metric="day_relative_volume" data-label="Day RVOL" title="Total day volume / 20-session average; not time adjusted">${ratio1(row.day_relative_volume)}</td>${metricCell(row.minute_relative_volume, ratio1(row.minute_relative_volume), "1-minute RVOL", volumeClass)}<td class="live-num" data-metric="spread_pct" data-label="Bid–ask spread" title="Ask minus bid as a percentage of the midpoint; quote ${escapeHTML(clock(row.quote_at))}">${numeric(row.spread_pct) ? `${n(row.spread_pct, 2)}%` : "—"}</td>
+      <td data-label="Setup score"><span class="live-score-cell">${scoreBar(row.signal_score)}${n(row.signal_score)}</span></td>
+      <td class="live-eligibility">${eligibilityText(row)}</td>
+    </tr>`;
+    return `<tr class="${row.stale ? "live-stale" : ""}${selected}">
       <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Open ${symbol} intraday report"><span class="live-symbol">${symbol}<span class="live-row-dot ${row.stale ? "stale" : ""}" title="${row.stale ? "Stale or unavailable market data" : "Price and quote freshness checked"}"></span></span><span class="live-setup ${levelClass(row.signal)}">${setup(row.signal)}</span></button><button type="button" class="live-candle-open" data-live-candles="${symbol}" title="Full-screen candles" aria-label="Open ${symbol} full-screen candlestick chart">${icon("trend")}</button></td>
       <td class="live-num" data-label="Price / day"><strong>${dollars(row.price)}</strong><small class="${direction(row.change_pct)}">${pct(row.change_pct)}</small></td>
       ${screeningCells(row)}
       <td class="live-eligibility">${eligibilityText(row)}</td>
-      ${view.extraColumns ? `<td class="live-num" data-label="Setup score"><span class="live-score">${n(row.signal_score)}<small>/100</small></span></td>${metricCell(row.minute_relative_volume, ratio(row.minute_relative_volume), "1-minute RVOL", volumeClass)}${metricCell(row.float_shares, short(row.float_shares), "Float shares")}${metricCell(row.gap_pct, pct(row.gap_pct), "Opening gap percentage", direction(row.gap_pct))}${metricCell(row.session_volume, short(row.session_volume), "Completed regular-session minute volume")}${metricCell(row.avg_volume_30d, short(row.avg_volume_30d), "30-session average volume")}${metricCell(row.volume_30d_total, short(row.volume_30d_total), "30-session total volume")}${metricCell(row.relative_volume, ratio(row.relative_volume), "Session RVOL")}` : ""}
+      ${view.extraColumns ? `<td class="live-num" data-label="Setup score"><span class="live-score">${n(row.signal_score)}<small>/100</small></span></td>${minuteCell}${metricCell(row.float_shares, short(row.float_shares), "Float shares")}${metricCell(row.gap_pct, pct(row.gap_pct), "Opening gap percentage", direction(row.gap_pct))}${metricCell(row.session_volume, short(row.session_volume), "Completed regular-session minute volume")}${metricCell(row.avg_volume_30d, short(row.avg_volume_30d), "30-session average volume")}${metricCell(row.volume_30d_total, short(row.volume_30d_total), "30-session total volume")}${metricCell(row.relative_volume, ratio(row.relative_volume), "Session RVOL")}` : ""}
     </tr>`;
   }
   function renderTable() {
@@ -512,7 +528,7 @@
     }
     if (!filtered.length) { replaceMarkup("#live-table", '<div class="live-empty"><h3>No matching symbols</h3><p>Try another symbol or company name.</p></div>'); return; }
     const focused = document.activeElement?.dataset.liveSymbol;
-    const changed = replaceMarkup("#live-table", `<table class="live-stocks ${view.extraColumns ? "expanded" : ""}"><thead><tr><th>Stock / setup</th><th class="live-num">Price / day</th>${screeningHeaders()}<th>Alert eligibility</th>${view.extraColumns ? '<th class="live-num">Setup score</th><th class="live-num">1-min RVOL</th><th class="live-num">Float</th><th class="live-num">Gap</th><th class="live-num">Regular vol.</th><th class="live-num">30D avg vol.</th><th class="live-num">30D total vol.</th><th class="live-num">Session RVOL</th>' : ""}</tr></thead><tbody>${filtered.map((row) => stockRow(row, config)).join("")}</tbody></table>`);
+    const changed = replaceMarkup("#live-table", `<table class="live-stocks ${view.extraColumns ? "expanded" : ""}"><thead><tr>${view.extraColumns ? `<th>Stock / setup</th><th class="live-num">Price / day</th>${screeningHeaders()}` : '<th>Stock</th><th class="live-num">Price / day</th><th class="live-num">Day vol</th><th class="live-num">Day RVOL</th><th class="live-num" title="Latest completed minute\'s volume divided by the preceding 20-minute average">1-min RVOL</th><th class="live-num">Spread</th><th>Setup score</th>'}<th>Alert eligibility</th>${view.extraColumns ? '<th class="live-num">Setup score</th><th class="live-num">1-min RVOL</th><th class="live-num">Float</th><th class="live-num">Gap</th><th class="live-num">Regular vol.</th><th class="live-num">30D avg vol.</th><th class="live-num">30D total vol.</th><th class="live-num">Session RVOL</th>' : ""}</tr></thead><tbody>${filtered.map((row) => stockRow(row, config)).join("")}</tbody></table>`);
     if (changed && focused) [...q("#live-table").querySelectorAll("[data-live-symbol]")].find((button) => button.dataset.liveSymbol === focused)?.focus({preventScroll:true});
   }
   function renderFreshness() {
@@ -521,8 +537,123 @@
     const status = view.snapshot.status;
     const interrupted = elapsed > 35;
     const browserState = interrupted ? "Browser updates interrupted" : view.transport === "polling" ? "Browser polling every 2s" : "Browser streaming";
-    q("#live-update-time").textContent = `${status.updated_at ? `Data ${clock(status.updated_at)}` : "No session data yet"} · ${browserState}${interrupted ? ` (${elapsed}s)` : ""}`;
+    q("#live-update-time").textContent = `${sourceLabel(status.source || view.snapshot.config.source, status.feed || view.snapshot.provider_status?.feed).replace("Alpaca · ", "Alpaca ")} · data ${status.updated_at ? nySeconds.format(new Date(status.updated_at)) + " ET" : "—"}${interrupted ? ` · ${browserState} (${elapsed}s)` : ""}`;
     q("#live-update-time").classList.toggle("negative", interrupted);
+    renderNextScan();
+  }
+  const scanDay = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", weekday:"short", hour:"numeric", minute:"2-digit"});
+  function renderNextScan() {
+    // The countdown fills over the 5-minute repeat; a later first search of the day shows its New York time.
+    const status = view.discoveryStatus, due = Date.parse(status?.next_due || ""), left = Math.max(0, Math.round((due - Date.now()) / 1000));
+    const scanning = status?.running || view.discoveryBusy;
+    q("#live-next-scan").textContent = scanning ? "scanning…" : Number.isNaN(due) ? "off" : left > 300 ? `${scanDay.format(due)} ET` : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    q("#live-next-scan-fill").style.width = `${scanning ? 100 : Number.isNaN(due) || left > 300 ? 0 : (1 - left / 300) * 100}%`;
+  }
+  function focusBars(row) {
+    // Alpaca rows chart real candles at any timeframe; the demo groups its completed 1-minute bars.
+    const [tf, , ms] = candleFrames.find(([key]) => key === view.focusTf);
+    if (row.source === "alpaca") {
+      const data = view.focusCandles?.key === `${row.symbol}|${tf}` ? view.focusCandles : null;
+      return data && {bars:withLivePrice(data.bars, row, ms).slice(-60), error:data.error};
+    }
+    const minutes = view.focusDetail?.symbol === row.symbol ? view.focusDetail.chart : null;
+    if (!minutes) return null;
+    if (!ms) return {bars:[], error:"Daily candles need Alpaca market data."};
+    const groups = new Map();
+    for (const bar of minutes) {
+      const start = Math.floor(Date.parse(bar.t) / ms) * ms, group = groups.get(start);
+      if (!group) groups.set(start, {...bar, t:new Date(start).toISOString()});
+      else Object.assign(group, {high:Math.max(group.high, bar.high), low:Math.min(group.low, bar.low), close:bar.close, volume:(group.volume || 0) + (bar.volume || 0)});
+    }
+    return {bars:[...groups.values()].slice(-60), error:""};
+  }
+  function focusChart(bars) {
+    if (!bars.length) return '<p class="live-chart-empty">No candles for this timeframe yet.</p>';
+    const width = 400, height = 252, right = 58, top = 6, priceBottom = 186, volumeTop = 200, volumeBottom = 248;
+    const low = Math.min(...bars.map((bar) => bar.low)), high = Math.max(...bars.map((bar) => bar.high)), pad = Math.max((high - low) * .08, high * .002, .005);
+    const min = low - pad, max = high + pad, step = (width - right) / bars.length, body = Math.max(1, step * .62);
+    const x = (i) => step * (i + .5), y = (price) => top + (max - price) / (max - min) * (priceBottom - top);
+    const maxVolume = Math.max(1, ...bars.map((bar) => bar.volume || 0)), last = bars[bars.length - 1], lastY = y(last.close);
+    const lastColor = last.close >= (bars[bars.length - 2]?.close ?? last.open) ? "#2f6b43" : "#a3412a", tick = niceStep(max - min, 3);
+    let grid = "";
+    for (let value = Math.ceil(min / tick) * tick; value <= max; value += tick) grid += `<line x1="0" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="#edf0ea"/>${Math.abs(y(value) - lastY) < 14 ? "" : `<text x="${width - right + 8}" y="${y(value) + 4}" fill="#56625a" font-size="11">${priceText(value)}</text>`}`;
+    const candles = bars.map((bar, i) => {
+      const up = bar.close >= bar.open, color = up ? "#2f6b43" : "#a3412a", volume = (bar.volume || 0) / maxVolume * (volumeBottom - volumeTop);
+      return `<line x1="${x(i)}" x2="${x(i)}" y1="${y(bar.high)}" y2="${y(bar.low)}" stroke="${color}"/><rect x="${x(i) - body / 2}" y="${y(Math.max(bar.open, bar.close))}" width="${body}" height="${Math.max(1, Math.abs(y(bar.open) - y(bar.close)))}" fill="${color}"/><rect x="${x(i) - body / 2}" y="${volumeBottom - volume}" width="${body}" height="${volume}" fill="${up ? "#a9cdb2" : "#e3b9ac"}"><title>${escapeHTML(candleTime.format(new Date(bar.t)))} ET · ${n(bar.volume)} shares</title></rect>`;
+    }).join("");
+    return `<svg viewBox="0 0 ${width} ${height}" class="live-focus-candles" role="img" aria-label="${bars.length} candles, last close ${dollars(last.close)}">${grid}${candles}<rect x="${width - right + 2}" y="${lastY - 10}" width="${right - 2}" height="20" rx="4" fill="${lastColor}"/><text x="${width - right / 2 + 1}" y="${lastY + 4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">${priceText(last.close)}</text></svg>`;
+  }
+  function renderFocus() {
+    const rows = view.snapshot?.rows || [];
+    if (!rows.some((row) => row.symbol === view.focus)) { view.focus = [...rows].sort(compareRows(view.sort))[0]?.symbol || null; view.focusDetail = null; loadFocus(); }
+    const row = rows.find((item) => item.symbol === view.focus);
+    if (!row) { replaceMarkup("#live-focus", '<div class="live-focus-empty"><h3>Select a stock</h3><p>Radar stocks appear here with their candles and why each one is or is not alerting.</p></div>'); return; }
+    const config = view.snapshot.config, reasons = row.reasons || [], confirmation = row.confirmation || {};
+    const required = confirmation.required || config.confirmation_bars || 1, session = row.eligibility?.checks?.find((check) => check.name === "Session volume");
+    const checks = [
+      ["Price in range", `${dollars(row.price)} · ${dollars(config.min_price)}–${dollars(config.max_price)}`, numeric(row.price) && row.price >= config.min_price && row.price <= config.max_price],
+      ["Regular-session volume", `${short(session?.actual)} · ≥ ${short(config.min_session_volume)}`, !!session?.passed],
+      ["Above session VWAP", reasons.includes("Above session VWAP") ? "Yes" : "No", reasons.includes("Above session VWAP")],
+      ["EMA 9 above EMA 20", reasons.includes("EMA trend") ? "Yes" : "No", reasons.includes("EMA trend")],
+      ["Setup score", `${n(row.signal_score)} · Buy ≥ ${n(config.buy_score)}`, numeric(row.signal_score) && row.signal_score >= config.buy_score],
+      ["Fresh market data", row.stale ? "Stale or incomplete" : "Checked", !row.stale],
+      ["Confirmation", `${n(Math.min(confirmation.bars || 0, required))} of ${n(required)} bars`, !!confirmation.confirmed]
+    ];
+    const data = focusBars(row), symbol = escapeHTML(row.symbol);
+    const chart = !data ? '<p class="live-chart-empty">Loading candles…</p>' : data.error && !data.bars.length ? `<p class="live-chart-empty">${escapeHTML(data.error)}</p>` : focusChart(data.bars);
+    replaceMarkup("#live-focus", `<div class="live-focus-head"><div><div class="live-focus-symbol"><h2 class="live-mono">${symbol}</h2>${badge(row.signal)}</div><p class="live-mono"><strong>${dollars(row.price)}</strong> <span class="${direction(row.change_pct)}">${pct1(row.change_pct)}</span></p></div><button type="button" class="button subtle" data-live-candles="${symbol}" aria-label="Open ${symbol} full-screen candlestick chart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>Full chart</button></div>
+      <div class="live-tf" role="group" aria-label="Chart timeframe">${candleFrames.map(([tf, label]) => `<button type="button" data-live-focus-tf="${tf}" aria-pressed="${tf === view.focusTf}">${label}</button>`).join("")}</div>
+      <div class="live-focus-chart">${chart}</div>
+      <dl class="live-focus-metrics">${[["Day volume", short(row.day_volume)], ["Day RVOL", ratio1(row.day_relative_volume)], ["1-min RVOL", ratio1(row.minute_relative_volume)], ["Spread", numeric(row.spread_pct) ? `${n(row.spread_pct, 2)}%` : "—"], ["ATR % (14D)", numeric(row.atr_pct) ? `${n(row.atr_pct, 1)}%` : "—"], ["Setup score", `${n(row.signal_score)} / 100`]].map(([label, value]) => `<div><dt>${label}</dt><dd class="live-mono">${value}</dd></div>`).join("")}</dl>
+      <h3>Why it is or is not alerting</h3><ul class="live-focus-checks">${checks.map(([label, value, passed]) => `<li><span>${label}</span><span><span class="live-mono">${escapeHTML(value)}</span><b class="${passed ? "pass" : "fail"}">${passed ? "Pass" : "Fail"}</b></span></li>`).join("")}</ul>
+      <button type="button" class="text-button live-focus-report" data-live-report="${symbol}">Open full report</button>`);
+  }
+  function selectFocus(symbol) {
+    // A narrow window has no room beside the radar, so the full report opens instead.
+    if (innerWidth <= 1100) { showStock(symbol); return; }
+    view.focus = symbol;
+    view.focusDetail = null;
+    renderTable(); renderFocus(); loadFocus();
+  }
+  async function loadFocus() {
+    const symbol = view.focus, tf = view.focusTf;
+    if (!symbol || view.focusFetching || document.hidden || q("#live-view").classList.contains("hidden")) return;
+    const row = view.snapshot?.rows?.find((item) => item.symbol === symbol);
+    view.focusFetching = true;
+    try {
+      if (row?.source === "alpaca") {
+        const key = `${symbol}|${tf}`;
+        if (view.focusCandles?.key !== key || Date.now() - view.focusCandles.at > 15000) {
+          try { view.focusCandles = {key, bars:(await api(`/api/monitor/candles/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(tf)}`)).candles, at:Date.now(), error:""}; }
+          catch (error) { view.focusCandles = {key, bars:[], at:Date.now(), error:`Candles unavailable: ${error.message}`}; }
+        }
+      } else {
+        const data = await api(`/api/monitor/symbol/${encodeURIComponent(symbol)}`);
+        if (symbol === view.focus) view.focusDetail = data.row;
+      }
+    } catch (_) { /* The panel keeps its last chart; the full report shows fetch errors. */ }
+    finally { view.focusFetching = false; }
+    if (symbol !== view.focus || tf !== view.focusTf) loadFocus(); else renderFocus();
+  }
+  async function loadPulse() {
+    if (document.hidden || q("#live-view").classList.contains("hidden")) return;
+    try { view.pulse = await api("/api/market/pulse"); view.pulseError = ""; }
+    catch (error) { view.pulseError = error.message; }
+    renderPulse();
+  }
+  function renderPulse() {
+    const quotes = view.pulse?.quotes || [], indexes = quotes.filter((item) => item.kind === "index"), movers = quotes.filter((item) => item.kind === "mover");
+    const up = (list) => list.filter((item) => item.change_pct > 0).length;
+    q("#live-pulse-summary").textContent = quotes.length ? `${up(indexes)} of ${indexes.length} indexes up · ${up(movers)} of ${movers.length} movers up · small caps (IWM) ${pct(indexes.find((item) => item.symbol === "IWM")?.change_pct)}` : "";
+    q("#live-pulse-note").textContent = view.pulseError ? (quotes.length ? `Update failed; showing ${clock(view.pulse.as_of)}` : "") : view.pulse?.quotes?.length ? `Index ETFs track each index · ${sourceLabel("alpaca", view.pulse.feed)} · ${quotes.some((item) => item.live) ? `live ${clock(view.pulse.as_of)}` : `closing prices ${date(quotes.find((item) => item.session_date)?.session_date)}`}` : view.pulse ? "" : "Loading index ETFs and market movers…";
+    if (!quotes.length) { replaceMarkup("#live-pulse", view.pulseError || view.pulse?.message ? `<p class="live-pulse-error">${escapeHTML(view.pulse?.message || `Market pulse is unavailable: ${view.pulseError}`)}</p>` : ""); return; }
+    const spark = (values, change) => {
+      if (values.length < 2) return "";
+      const low = Math.min(...values), high = Math.max(...values), points = values.map((value, i) => `${(i * 96 / (values.length - 1)).toFixed(1)},${(30 - (value - low) / (high - low || 1) * 28).toFixed(1)}`).join(" ");
+      return `<svg viewBox="0 0 96 32" aria-hidden="true"><polyline points="${points}" fill="none" class="${direction(change)}" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+    };
+    const label = (item) => `Open ${item.name ? `${item.name} (${item.symbol})` : item.symbol} full-screen chart, ${pct(item.change_pct)}`;
+    replaceMarkup("#live-pulse", `<div class="live-pulse-indexes">${indexes.map((item) => `<button type="button" class="live-pulse-card" data-live-candles="${escapeHTML(item.symbol)}" aria-label="${escapeHTML(label(item))}"><span><span class="live-pulse-name">${escapeHTML(item.name)} <small>${escapeHTML(item.symbol)}</small></span><strong>${dollars(item.price)}</strong><span class="${direction(item.change_pct)}">${pct(item.change_pct)}</span></span>${spark(item.spark || [], item.change_pct)}</button>`).join("")}</div><div class="live-pulse-movers"><h3>Market movers</h3>${movers.map((item) => `<button type="button" class="live-pulse-chip" data-live-candles="${escapeHTML(item.symbol)}" aria-label="${escapeHTML(label(item))}"><strong>${escapeHTML(item.symbol)}</strong><span class="${direction(item.change_pct)}">${pct(item.change_pct)}</span></button>`).join("")}</div>`);
   }
   function renderAlerts() {
     const alerts = currentAlerts();
@@ -530,9 +661,11 @@
     const key = JSON.stringify([view.snapshot.config.source, alerts]);
     if (key === view.alertsKey) return;
     view.alertsKey = key;
+    const today = nyDay(Date.now()), day = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", month:"short", day:"numeric"});
+    const when = (value) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? "—" : nyDay(time) === today ? nyClock.format(time) : day.format(time); };
     q("#live-alerts").innerHTML = !alerts.length
-      ? `<div class="live-alert-empty"><span aria-hidden="true">◎</span><h3>${demo ? "No demo alerts yet" : "No market alerts yet"}</h3><p>${demo ? "Synthetic setups appear here while the demo monitor runs." : "Alpaca setups appear here after fresh regular-session data passes your filters and confirmation rules."} Saved alerts from all sources remain in the research journal.</p></div>`
-      : alerts.map((item) => `<article class="live-alert-card ${item.acknowledged ? "read" : "unread"}"><div class="live-alert-top"><button class="live-alert-symbol" data-live-alert="${escapeHTML(item.id)}" aria-label="Open saved ${escapeHTML(item.symbol)} alert">${escapeHTML(item.symbol)}</button><span class="live-setup ${levelClass(item.level)}">${setup(item.level)}</span></div><p class="live-alert-source">${escapeHTML(sourceLabel(item.source, item.feed))} · ${clock(item.market_time || item.created_at, true)}</p><div class="live-alert-values"><strong>${dollars(item.price)}</strong><span>${n(item.score)} / 100</span></div>${item.reasons?.length ? `<p class="live-alert-reason">${escapeHTML(item.reasons.slice(0, 2).join(" · "))}</p>` : ""}<button class="text-button planner-entry-link" type="button" data-plan-alert="${escapeHTML(item.id)}">Analyze trade plan</button><div class="live-alert-bottom"><span>${item.acknowledged ? "Read" : "New setup"}</span>${item.acknowledged ? "" : `<button class="text-button" data-live-ack="${escapeHTML(item.id)}">Mark read</button>`}</div></article>`).join("");
+      ? `<div class="live-alert-empty"><h3>${demo ? "No demo alerts yet" : "No market alerts yet"}</h3><p>${demo ? "Synthetic setups appear here while the demo monitor runs." : "Alpaca setups appear here after fresh regular-session data passes your filters and confirmation rules."} Saved alerts from all sources remain in the journal.</p></div>`
+      : alerts.map((item) => `<button type="button" class="live-alert-row ${item.acknowledged ? "read" : "unread"}" data-live-alert="${escapeHTML(item.id)}" aria-label="Open saved ${escapeHTML(item.symbol)} ${escapeHTML(setup(item.level))} alert from ${escapeHTML(clock(item.market_time || item.created_at, true))}${item.acknowledged ? "" : ", unread"}"><i aria-hidden="true"></i><span class="live-mono">${when(item.market_time || item.created_at)}</span><strong class="live-mono">${escapeHTML(item.symbol)}</strong><span>${badge(item.level)}</span><span class="live-mono">${dollars(item.price)} · ${n(item.score)}</span></button>`).join("");
   }
   function lineChart(series, markers = []) {
     const points = (series || []).filter((bar) => numeric(bar.close));
@@ -608,7 +741,7 @@
       for (j = i + 1; j < sessions.length && sessions[j] === sessions[i]; j++);
       if (sessions[i]) bands += `<rect x="${left + step * i}" y="${top}" width="${step * (j - i)}" height="${volumeBottom - top}" fill="${sessionFill[sessions[i]]}" opacity=".45"/>`;
     }
-    view.candleGeo = {points, sessions, label, width, height, left, right, top, step, priceBottom, volumeTop, volumeBottom, min, max};
+    view.candleGeo = {points, sessions, label, width, height, left, right, top, step, priceBottom, volumeTop, volumeBottom, min, max, maxVolume};
     return `<svg viewBox="0 0 ${width} ${height}" class="live-price-chart" tabindex="0" role="img" aria-label="${points.length} candles from ${label(points[0].t)} to ${label(last.t)}. Last close ${dollars(last.close)}.">${bands}${grid}${axis}<line x1="${left}" x2="${width - right}" y1="${volumeTop - 6}" y2="${volumeTop - 6}" stroke="#dce5d9"/>${candles}<line x1="${left}" x2="${width - right}" y1="${lastY}" y2="${lastY}" stroke="${lastColor}" stroke-dasharray="2 3" opacity=".7"/><rect x="${width - right + 4}" y="${lastY - 9}" width="${right - 6}" height="18" rx="3" fill="${lastColor}"/><text x="${width - right + 9}" y="${lastY + 4}" fill="#fff" font-size="11">${priceText(last.close)}</text><text x="${left + 4}" y="${volumeTop + 6}" fill="#8a987c" font-size="10">Volume</text><text x="${width - right + 10}" y="${volumeTop + 8}" fill="#637360" font-size="11">${short(maxVolume)}</text><g class="live-candle-hover" pointer-events="none">${candleHover().svg}</g></svg>`;
   }
   function candleHover() {
@@ -621,7 +754,13 @@
     if (!h) return {svg:"", text};
     const x = g.left + g.step * (i + .5), tag = (y, value, fill) => `<line x1="${g.left}" x2="${g.width - g.right}" y1="${y}" y2="${y}" stroke="#637360" stroke-dasharray="3 3" opacity=".6"/><rect x="${g.width - g.right + 4}" y="${y - 9}" width="${g.right - 6}" height="18" rx="3" fill="${fill}"/><text x="${g.width - g.right + 9}" y="${y + 4}" fill="#fff" font-size="11">${value}</text>`;
     const price = g.max - (h.y - g.top) / (g.priceBottom - g.top) * (g.max - g.min);
-    const level = h.y >= g.top && h.y <= g.priceBottom ? tag(h.y, priceText(price), "#4d5d49") : h.y >= g.volumeTop && h.y <= g.volumeBottom ? tag(h.y, short(bar.volume), "#7d8f72") : "";
+    let level = h.y >= g.top && h.y <= g.priceBottom ? tag(h.y, priceText(price), "#4d5d49") : "";
+    if (h.y >= g.volumeTop - 6 && h.y <= g.volumeBottom) {
+      // Over the volume pane, the hovered bar carries its exact share count just above it.
+      const text = `${n(bar.volume)} shares`, w = text.length * 6.6 + 16, at = Math.max(g.left + w / 2, Math.min(g.width - g.right - w / 2, x));
+      const y = Math.max(g.top, g.volumeBottom - (bar.volume || 0) / g.maxVolume * (g.volumeBottom - g.volumeTop) - 26);
+      level = `<rect x="${at - w / 2}" y="${y}" width="${w}" height="20" rx="4" fill="#20332d"/><text x="${at}" y="${y + 14}" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">${text}</text>`;
+    }
     const when = g.label(bar.t), half = when.length * 3.6 + 10, at = Math.max(g.left + half, Math.min(g.width - g.right - half, x));
     return {svg:`<rect x="${x - g.step / 2}" y="${g.top}" width="${g.step}" height="${g.volumeBottom - g.top}" fill="#39704b" opacity=".07"/><line x1="${x}" x2="${x}" y1="${g.top}" y2="${g.volumeBottom}" stroke="#637360" stroke-dasharray="3 3" opacity=".6"/>${level}<rect x="${at - half}" y="${g.height - 21}" width="${half * 2}" height="18" rx="3" fill="#4d5d49"/><text x="${at}" y="${g.height - 8}" text-anchor="middle" fill="#fff" font-size="11">${when}</text>`, text};
   }
@@ -1082,7 +1221,9 @@
     q("#live-discovery-universe").addEventListener("change", (event) => q("#live-discovery-custom").classList.toggle("hidden", event.target.value !== "custom"));
     q("#live-use-candidates").addEventListener("click", useCandidates);
     q("#live-extra-columns").addEventListener("change", (event) => { view.extraColumns = event.target.checked; if (view.snapshot) renderTable(); });
-    q("#live-journal").addEventListener("click", () => { openDialog(q("#live-journal-dialog")); loadJournal(0); });
+    q("#live-journal").addEventListener("click", () => { location.hash = "journal"; });
+    q("#live-edit-rules").addEventListener("click", showConfig);
+    window.nomismaJournal = () => loadJournal(view.journal.offset);
     q("#live-journal-prev").addEventListener("click", () => loadJournal(view.journal.offset - view.journal.limit));
     q("#live-journal-next").addEventListener("click", () => loadJournal(view.journal.offset + view.journal.limit));
     q("#live-evidence-refresh").addEventListener("click", () => { if (view.savedAlert) showEvidence(view.savedAlert); });
@@ -1155,7 +1296,13 @@
       const candles = event.target.closest("[data-live-candles]");
       if (candles) window.nomismaCandles(candles.dataset.liveCandles);
       const stock = event.target.closest("[data-live-symbol]");
-      if (stock && view.snapshot) showStock(stock.dataset.liveSymbol);
+      if (stock && view.snapshot) selectFocus(stock.dataset.liveSymbol);
+      const focusFrame = event.target.closest("[data-live-focus-tf]");
+      if (focusFrame) { view.focusTf = focusFrame.dataset.liveFocusTf; renderFocus(); loadFocus(); }
+      const report = event.target.closest("[data-live-report]");
+      if (report && view.snapshot) showStock(report.dataset.liveReport);
+      const menu = event.target.closest(".live-menu-list button")?.closest("details");
+      if (menu) menu.open = false;
       const alert = event.target.closest("[data-live-alert]");
       if (alert) showEvidence(alert.dataset.liveAlert);
       const ack = event.target.closest("[data-live-ack]");
@@ -1248,11 +1395,15 @@
     window.addEventListener("pageshow", (event) => { if (event.persisted) { view.baseline = false; view.freshSince = Date.now(); fetchSnapshot().then(stream); pollDiscovery(); } });
     setInterval(renderFreshness, 1000);
     setInterval(() => fetchSelectedDetail(), 2000);
+    setInterval(loadFocus, 5000);
+    setInterval(loadPulse, 30000);
     // SSE comment heartbeats are invisible to EventSource. Verify quiet streams
     // periodically without treating an unchanged stopped session as disconnected.
     setInterval(() => { if (Date.now() - view.receivedAt > 15000 && !document.hidden) fetchSnapshot(); }, 10000);
   }
   mount(); mountResearch(); bind();
+  q("#live-sort").value = view.sort;
   fetchSnapshot().then(stream);
   pollDiscovery();
+  loadPulse();
 })();

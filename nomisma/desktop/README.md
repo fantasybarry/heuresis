@@ -21,7 +21,7 @@ The same release refreshes stale, missing, or invalid candidate quotes after his
 ## Native controls
 
 - **Nomisma → Settings** (`⌘,`) opens source and screener settings.
-- **View** switches between the live monitor, daily screener, and scan history. `⌘R` reloads the workspace.
+- **View** switches between the radar, daily screener, scan history, and alert journal. `⌘R` reloads the workspace.
 - **Refresh data** in the live monitor reloads market data while its connection continues. It is separate from reloading the window or restarting the local service.
 - **Nomisma → Show Research Data in Finder** opens the active data directory. **Open Configuration Folder** opens the folder containing `.env`.
 - CSV and backup exports use a native Save dialog; imports use a native file picker.

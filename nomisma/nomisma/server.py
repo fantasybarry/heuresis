@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from .engine import DEFAULT_FILTERS, PRESETS, screen, validate_filters
 from .providers import demo_dataset, fetch_alpaca, parse_csv, provider_status
 from .storage import Store
-from .live_data import fetch_candles
+from .live_data import fetch_candles, fetch_market_pulse
 from .monitor import LiveMonitor, MonitorBusy, monitor_csv
 from .monitor_metrics import MAX_MONITOR_SYMBOLS
 from .research import default_discovery, validate_discovery
@@ -613,6 +613,8 @@ def make_handler(app):
                         raise ValueError("Use a valid ticker symbol.")
                     query = parse_qs(parsed.query)
                     return self._json(fetch_candles(symbol, query.get("timeframe", ["5Min"])[0], query.get("before", [None])[0]))
+                if path == "/api/market/pulse":
+                    return self._json(fetch_market_pulse())
                 if path == "/api/monitor/events":
                     return self._monitor_events(compact=parse_qs(parsed.query).get("compact", [None])[0] == "1")
                 if path == "/api/monitor/export.csv":

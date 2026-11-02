@@ -188,9 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let view = submenu("View")
         item(view, "Reload Workspace", #selector(reloadWorkspace), "r", target: self)
         view.addItem(.separator())
-        item(view, "Live Monitor", #selector(showLive), "1", target: self)
+        item(view, "Radar", #selector(showLive), "1", target: self)
         item(view, "Daily Screener", #selector(showDaily), "2", target: self)
         item(view, "Scan History", #selector(showHistory), "3", target: self)
+        item(view, "Journal", #selector(showJournal), "4", target: self)
         let windowMenu = submenu("Window")
         item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))
@@ -211,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc private func showLive() { showMainWindow(); evaluateTrusted("location.hash = 'live'") }
     @objc private func showDaily() { showMainWindow(); evaluateTrusted("location.hash = 'dashboard'") }
     @objc private func showHistory() { showMainWindow(); evaluateTrusted("location.hash = 'history'") }
+    @objc private func showJournal() { showMainWindow(); evaluateTrusted("location.hash = 'journal'") }
     @objc private func showDataFolder() { if let url = dataDirectory { NSWorkspace.shared.open(url) } }
     @objc private func showConfigurationFolder() { if let url = envFile { NSWorkspace.shared.open(url.deletingLastPathComponent()) } }
     @objc private func openInBrowser() { if let url = webView.url, isTrusted(url) { NSWorkspace.shared.open(url) } }

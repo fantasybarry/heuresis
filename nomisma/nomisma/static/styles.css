@@ -2531,19 +2531,6 @@ h1>span {
   .top-nav {
     gap:15px
   }
-  .top-link {
-    display:none
-  }
-  .top-link[data-view=dashboard] {
-    display:block;
-    font-size:9px
-  }
-  .top-link[data-view=dashboard]:not(.active) {
-    display:none
-  }
-  .top-link.active {
-    display:block
-  }
   .demo-banner {
     align-items:flex-start;
     flex-direction:column;

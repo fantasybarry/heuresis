@@ -294,6 +294,70 @@ def fetch_candles(symbol, timeframe, before=None):
     return {"symbol": symbol, "timeframe": timeframe, "feed": status["feed"], "candles": candles}
 
 
+# Alpaca streams ETFs, not index values, so each index is followed through the ETF that tracks it.
+PULSE_INDEXES = (("SPY", "S&P 500"), ("QQQ", "Nasdaq-100"), ("DIA", "Dow Jones"), ("IWM", "Russell 2000"))
+PULSE_MOVERS = ("NVDA", "MSFT", "AAPL", "AMZN", "GOOGL", "META", "AVGO", "TSLA")
+
+
+def _number(value):
+    return value if type(value) in (int, float) and math.isfinite(value) and value > 0 else None
+
+
+def _pulse_quote(snap):
+    """(price, reference close, session date, live) from one snapshot."""
+    part = lambda key: snap.get(key) if isinstance(snap.get(key), dict) else {}
+    trade, daily, previous = part("latestTrade"), part("dailyBar"), part("prevDailyBar")
+
+    def ny(raw):
+        try:
+            return _stamp(raw).astimezone(_NY)
+        except ValueError:
+            return None
+    traded, day = ny(trade.get("t")), ny(daily.get("t"))
+    day = day.date() if day else None
+    # Regular-hours trades are live. Outside them, thin extended-hours prints would distort the
+    # day change, so the last completed session's close and change are shown instead.
+    if traded and _number(trade.get("p")) and traded.weekday() < 5 and daytime(9, 30) <= traded.time() < daytime(16):
+        reference = daily.get("c") if day and day < traded.date() else previous.get("c")
+        return _number(trade["p"]), _number(reference), traded.date(), True
+    return _number(daily.get("c")), _number(previous.get("c")), day, False
+
+
+def fetch_market_pulse():
+    """Price and day change for the index ETFs and the largest stocks, plus that session's 5-minute index closes."""
+    if not live_provider_status()["alpaca_configured"]:
+        # Without keys the panel explains itself; it is a normal setup state, not a failed request.
+        return {"quotes": [], "message": "Market pulse needs Alpaca market data. Add ALPACA_API_KEY and ALPACA_SECRET_KEY to your Nomisma configuration, then restart Nomisma."}
+    status, headers, unused_account = _credentials()
+    symbols = [symbol for symbol, _ in PULSE_INDEXES] + list(PULSE_MOVERS)
+    snapshots = _get_json("https://data.alpaca.markets/v2/stocks/snapshots",
+                          {"symbols": ",".join(symbols), "feed": status["feed"]}, headers)
+    if not isinstance(snapshots, dict):
+        raise ValueError("Alpaca returned invalid stock snapshots.")
+    values = {symbol: _pulse_quote(snapshots[symbol] if isinstance(snapshots.get(symbol), dict) else {}) for symbol in symbols}
+    days = [day for _, _, day, _ in values.values() if day]
+    spark = {}
+    if days:
+        # The trend line covers the shown session, premarket and after-hours included.
+        start = datetime.combine(max(days), daytime(4), _NY)
+        payload = _get_json("https://data.alpaca.markets/v2/stocks/bars", {
+            "symbols": ",".join(symbol for symbol, _ in PULSE_INDEXES), "timeframe": "5Min", "start": start.isoformat(),
+            "end": (start + timedelta(hours=16)).isoformat(), "limit": 1000, "feed": status["feed"]}, headers)
+        bars = payload.get("bars") if isinstance(payload, dict) else None
+        if isinstance(bars, dict):
+            spark = {symbol: [bar["c"] for bar in rows if isinstance(bar, dict) and _number(bar.get("c"))]
+                     for symbol, rows in bars.items() if isinstance(rows, list)}
+    names = dict(PULSE_INDEXES)
+    quotes = []
+    for symbol in symbols:
+        price, reference, day, live = values[symbol]
+        quotes.append({"symbol": symbol, "name": names.get(symbol), "kind": "index" if symbol in names else "mover",
+                       "price": price, "previous_close": reference,
+                       "change_pct": (price / reference - 1) * 100 if price and reference else None,
+                       "session_date": day.isoformat() if day else None, "live": live, "spark": spark.get(symbol, [])})
+    return {"feed": status["feed"], "as_of": _now().isoformat(), "quotes": quotes}
+
+
 def _screening_symbols(symbols):
     if not isinstance(symbols, (list, tuple)) or not 1 <= len(symbols) <= 500:
         raise ValueError("Screening history requires 1 to 500 symbols.")

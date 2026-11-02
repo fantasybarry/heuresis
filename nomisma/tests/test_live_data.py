@@ -740,5 +740,52 @@ class CandleTests(unittest.TestCase):
                 live.fetch_candles("AAPL", "1Min")
 
 
+class MarketPulseTests(unittest.TestCase):
+    def test_changes_use_previous_close_and_index_trend_lines_cover_the_trade_day(self):
+        snapshots = {
+            "SPY": {"latestTrade": {"p": 505.0, "t": "2025-07-03T14:30:00Z"}, "prevDailyBar": {"c": 500.0}},
+            "NVDA": {"latestTrade": {"p": 99.0, "t": "2025-07-03T14:30:00Z"}, "prevDailyBar": {"c": 100.0}},
+            "AAPL": {"latestTrade": {"p": 0}, "prevDailyBar": {"c": 200.0}},
+        }
+        bars = {"bars": {"SPY": [{"c": 501.0}, {"c": float("nan")}, {"c": 504.0}]}}
+        with patch.dict(os.environ, ENV), patch.object(live, "_get_json", side_effect=[snapshots, bars]) as get:
+            result = live.fetch_market_pulse()
+        quotes = {quote["symbol"]: quote for quote in result["quotes"]}
+        self.assertEqual(len(quotes), 12)
+        self.assertAlmostEqual(quotes["SPY"]["change_pct"], 1.0)
+        self.assertEqual((quotes["SPY"]["name"], quotes["SPY"]["kind"], quotes["SPY"]["spark"]), ("S&P 500", "index", [501.0, 504.0]))
+        self.assertAlmostEqual(quotes["NVDA"]["change_pct"], -1.0)
+        self.assertEqual(quotes["NVDA"]["kind"], "mover")
+        self.assertIsNone(quotes["AAPL"]["price"])
+        self.assertIsNone(quotes["AAPL"]["change_pct"])
+        self.assertIsNone(quotes["QQQ"]["change_pct"])
+        self.assertEqual(get.call_args_list[1].args[1]["start"], "2025-07-03T04:00:00-04:00")
+
+    def test_outside_regular_hours_shows_the_last_session_close(self):
+        # An 18:00 ET print is ignored; the session close and its change against the prior close are shown.
+        snapshots = {"MSFT": {"latestTrade": {"p": 445.0, "t": "2025-07-03T22:00:00Z"},
+                              "dailyBar": {"t": "2025-07-03T04:00:00Z", "c": 102.0}, "prevDailyBar": {"c": 100.0}}}
+        with patch.dict(os.environ, ENV), patch.object(live, "_get_json", side_effect=[snapshots, {"bars": {}}]) as get:
+            quote = next(item for item in live.fetch_market_pulse()["quotes"] if item["symbol"] == "MSFT")
+        self.assertEqual((quote["price"], quote["live"], quote["session_date"]), (102.0, False, "2025-07-03"))
+        self.assertAlmostEqual(quote["change_pct"], 2.0)
+        self.assertEqual(get.call_args_list[1].args[1]["start"], "2025-07-03T04:00:00-04:00")
+
+    def test_new_session_before_the_daily_bar_updates_uses_the_last_close(self):
+        snapshots = {"SPY": {"latestTrade": {"p": 101.0, "t": "2025-07-07T14:00:00Z"},
+                             "dailyBar": {"t": "2025-07-03T04:00:00Z", "c": 100.0}, "prevDailyBar": {"c": 90.0}}}
+        with patch.dict(os.environ, ENV), patch.object(live, "_get_json", side_effect=[snapshots, {"bars": {}}]):
+            quote = live.fetch_market_pulse()["quotes"][0]
+        self.assertTrue(quote["live"])
+        self.assertAlmostEqual(quote["change_pct"], 1.0)
+
+    def test_missing_credentials_is_a_message_not_an_error(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(live, "_get_json") as get:
+            result = live.fetch_market_pulse()
+        self.assertEqual(result["quotes"], [])
+        self.assertIn("ALPACA_API_KEY", result["message"])
+        get.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

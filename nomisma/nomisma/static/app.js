@@ -256,7 +256,7 @@ function renderStrategy() {
 function renderWarnings() {
   const warnings = state.latest?.warnings || [];
   const element = $("#scan-warnings");
-  element.classList.toggle("hidden", !warnings.length || state.view === "live");
+  element.classList.toggle("hidden", !warnings.length || state.view === "live" || state.view === "journal");
   element.innerHTML = warnings.length ? `<details><summary>${icon("info")}<span>${escapeHTML(warnings[0])}${warnings.length > 1 ? ` <span class="warning-count">+${warnings.length - 1} data notes</span>` : ""}</span></summary><ul>${warnings.map((warning) => `<li>${escapeHTML(warning)}</li>`).join("")}</ul></details>` : "";
 }
 async function loadHistory(offset = 0) {
@@ -286,13 +286,12 @@ function renderHistory() {
 function renderHeader() {
   const scan = state.latest;
   $("#as-of-label").textContent = scan ? `Data as of ${dateLabel(scan.as_of)}` : "No completed scan";
-  $("#demo-banner").classList.toggle("hidden", scan?.source !== "demo" || state.view === "live");
+  $("#demo-banner").classList.toggle("hidden", scan?.source !== "demo" || state.view === "live" || state.view === "journal");
   $("#connection-label").textContent = scan ? sourceName(scan.source) : "Local workspace";
   $("#connection-button").classList.toggle("live", scan?.source === "alpaca" && state.view !== "live");
   $("#connection-button").classList.toggle("imported", scan?.source === "csv");
   $("#run-scan").disabled = Boolean(state.job.running || state.scanSubmitting);
   $("#scan-button-label").textContent = state.job.running || state.scanSubmitting ? "Screening…" : "Run screener";
-  if (state.view === "live") $("#connection-label").textContent = "Workspace settings";
 }
 function renderAll() {
   renderHeader(); renderStats(); renderFilterChips(); renderResults(); renderMarket(); renderStrategy(); renderWarnings(); renderHistory();
@@ -301,11 +300,13 @@ function changeView(view, updateHash = true) {
   const metadata = {
     live:["INTRADAY · PENNY-STOCK MOMENTUM", "Catch the move. Know the setup", "Follow price, participation, and momentum as the session unfolds."],
     dashboard:["YOUR DAILY RESEARCH WORKSPACE", "Your market, in focus", "Find strength in the noise. Discover stocks that meet your strategy."],
-    history:["YOUR RESEARCH, OVER TIME", "Every scan tells a story", "Revisit your screens and the market conditions behind them."]
+    history:["YOUR RESEARCH, OVER TIME", "Every scan tells a story", "Revisit your screens and the market conditions behind them."],
+    journal:["SAVED SETUP ALERTS", "What happened next", "Price changes after each alert, measured from the signal minute’s close."]
   };
   if (!metadata[view]) view = "live";
   state.view = view;
   if (view === "history") loadHistory(state.historyOffset);
+  if (view === "journal") window.nomismaJournal?.();
   $$(".view-panel").forEach((panel) => panel.classList.toggle("hidden", panel.id !== `${view}-view`));
   $$("[data-view]").forEach((button) => {
     const active = button.dataset.view === view;
@@ -315,12 +316,14 @@ function changeView(view, updateHash = true) {
   $("#page-eyebrow").textContent = metadata[view][0];
   $("#page-title").innerHTML = `${metadata[view][1]}<span>.</span>`;
   $("#page-description").textContent = metadata[view][2];
-  $(".heading-actions").classList.toggle("hidden", view === "live");
-  $("#job-status").classList.toggle("hidden", view === "live" || !state.job.running);
+  // The radar's own status bar replaces the page heading; the daily scan button only belongs to screener pages.
+  $(".page-heading").classList.toggle("hidden", view === "live");
+  $(".heading-actions").classList.toggle("hidden", view === "journal");
+  $("#job-status").classList.toggle("hidden", view === "live" || view === "journal" || !state.job.running);
   renderHeader();
   renderWarnings();
   document.body.classList.toggle("live-active", view === "live");
-  document.title = `Nomisma — ${view === "history" ? "Scan history" : view.charAt(0).toUpperCase() + view.slice(1)}`;
+  document.title = `Nomisma — ${({live:"Radar", dashboard:"Daily screener", history:"Scan history", journal:"Alert journal"})[view]}`;
   if (updateHash && window.location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
 }
 

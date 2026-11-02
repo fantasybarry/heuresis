@@ -20,18 +20,31 @@
       <a class="platform-mark" href="#live" aria-label="Heuresis home" title="Heuresis"><span>h<span class="mark-dot">.</span></span></a>
       <div class="sidebar-divider"></div>
       <nav class="side-nav" aria-label="Main navigation">
-        <button class="side-link active" data-view="live" aria-label="Live monitor" title="Live monitor"><span data-icon="trend"></span><span class="side-label">Live</span></button>
+        <button class="side-link active" data-view="live" aria-label="Radar" title="Radar"><span data-icon="trend"></span><span class="side-label">Radar</span></button>
         <button class="side-link" data-view="dashboard" aria-label="Daily screener" title="Daily screener"><span data-icon="grid"></span><span class="side-label">Daily</span></button>
         <button class="side-link" data-view="history" aria-label="Scan history" title="Scan history"><span data-icon="history"></span><span class="side-label">History</span></button>
+        <button class="side-link" data-view="journal" aria-label="Alert journal" title="Alert journal"><span data-icon="target"></span><span class="side-label">Journal</span></button>
       </nav>
       <div class="sidebar-bottom"><button class="side-link" id="sidebar-settings" aria-label="Data and schedule settings" title="Data and schedule"><span data-icon="settings"></span><span class="side-label">Settings</span></button><span class="workspace-avatar" title="Local research workspace">N<span></span></span></div>
     </aside>
 
     <div class="app-shell">
       <header class="topbar">
-        <a href="#live" class="brand" aria-label="Nomisma live monitor"><span class="nomisma-mark" aria-hidden="true"><svg viewBox="0 0 30 30"><path d="M5 24V6h5l10 12V6h5v18h-5L10 12v12z" fill="currentColor"/></svg></span><span>nomisma<span class="brand-byline">BY HEURESIS</span></span></a>
-        <nav class="top-nav" aria-label="Workspace pages"><button class="top-link active" data-view="live">Live monitor</button><button class="top-link" data-view="dashboard">Daily screener</button><button class="top-link" data-view="history">Scan history</button></nav>
-        <button class="connection-status" id="connection-button"><span class="status-dot"></span><span id="connection-label">Local workspace</span><span data-icon="chevron-down"></span></button>
+        <a href="#live" class="brand" aria-label="Nomisma radar"><svg class="brand-radar" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="11.5" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="13" cy="13" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".55"/><path d="M13 13 22 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="18.5" cy="9" r="2" fill="currentColor"/></svg><span>Nomisma</span></a>
+        <nav class="top-nav" aria-label="Workspace pages"><button class="top-link active" data-view="live">Radar</button><button class="top-link" data-view="dashboard">Daily screener</button><button class="top-link" data-view="history">History</button><button class="top-link" data-view="journal">Journal</button></nav>
+        <section class="live-header" aria-label="Monitor controls">
+          <div class="live-command-status"><span class="live-state-dot" id="live-state-dot"></span><div><strong id="live-connection">Loading monitor</strong><span id="live-status-message">Reading your saved configuration…</span><span id="live-update-time" class="live-mono hidden"></span><span id="live-refresh-status" class="sr-only" role="status">Live prices update automatically while monitoring.</span></div></div>
+          <div class="live-scan-box"><div class="live-next-scan" title="Scheduled candidate searches replace the radar every 5 minutes until the 4 p.m. close"><span>Next auto-scan <strong id="live-next-scan" class="live-mono">—</strong></span><span class="live-next-scan-track" aria-hidden="true"><span id="live-next-scan-fill"></span></span><span id="live-schedule-summary" class="sr-only" role="status">Loading schedule…</span></div><button class="button primary" id="live-scan" title="Run your saved candidate search and load the matching stocks into the radar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg><span>Scan now</span></button></div>
+          <button class="button subtle hidden" id="live-stop"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop monitor</button><button class="button primary" id="live-start" disabled><span aria-hidden="true">▶</span> Start monitor</button>
+          <details class="live-menu"><summary class="live-menu-button" aria-label="Monitor and workspace settings" title="Monitor and workspace settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></summary>
+            <div class="live-menu-list">
+              <button type="button" id="live-refresh" disabled title="Reload all monitored quotes, history, volume baselines, and saved setup alerts">Refresh data</button><button type="button" id="live-config" disabled>Configure monitor</button><button type="button" id="live-discover">Find candidates</button><button type="button" id="live-schedule-open">Schedule candidate searches</button><button type="button" id="live-diagnostics">Test connection</button><button type="button" id="live-export" disabled>Export radar CSV</button>
+              <label class="live-menu-check"><input type="checkbox" id="live-extra-columns"> Show all radar metrics</label>
+              <hr><button type="button" class="live-option" id="live-notifications" aria-pressed="false">Desktop alerts <span>Off</span></button><button type="button" class="live-option" id="live-sound" aria-pressed="false">Alert sound <span>Off</span></button><p id="live-notification-note">Loading alert preferences…</p>
+              <hr><button type="button" data-planner-settings>Model &amp; sizing settings</button><button type="button" id="connection-button">Workspace settings <small id="connection-label">Local workspace</small></button>
+            </div>
+          </details>
+        </section>
       </header>
 
       <main id="main-content" tabindex="-1">
@@ -60,6 +73,7 @@
           </section>
 
           <section id="history-view" class="view-panel hidden" aria-label="Scan history"><div class="panel"><div class="panel-heading"><div><h2>A record of your research</h2><p>Open a completed scan to revisit its filters, signals, and data date.</p></div><span id="history-count" class="count-pill">0 scans</span></div><div id="history-error" class="alert error hidden" role="alert"></div><div id="history-results" class="table-scroll"></div><div class="table-footer"><span id="history-page-label" role="status"></span><div class="history-page-actions"><button id="history-previous" class="button subtle">Previous</button><button id="history-next" class="button subtle">Next</button></div></div></div></section>
+          <section id="journal-view" class="view-panel hidden" aria-label="Alert journal"></section>
           <footer class="page-footer"><span><span class="footer-brand">nomisma</span> <span class="footer-divider">/</span> A Heuresis project</span><span>Built for thoughtful research. Not investment advice.</span></footer>
         </div>
       </main>
