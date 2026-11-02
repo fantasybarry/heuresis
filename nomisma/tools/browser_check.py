@@ -241,10 +241,13 @@ def check_live(client, app, server_port, output, temporary):
 
     client.wait("document.querySelectorAll('#live-focus [data-live-candles]').length > 0")
     client.evaluate("document.querySelector('#live-focus [data-live-candles]').click()")
-    client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-dialog').classList.contains('candle-full')")
+    client.wait("document.querySelector('#live-report-dialog').open && document.querySelector('#live-report-dialog').classList.contains('candle-full') && document.querySelector('#live-candle-chart svg')")
+    client.evaluate("""(() => { const svg = document.querySelector('#live-candle-chart svg'), r = svg.getBoundingClientRect(), b = svg.viewBox.baseVal;
+      svg.dispatchEvent(new PointerEvent('pointermove', {bubbles:true, clientX:r.left + r.width / 2, clientY:r.top + (b.height - 55) / b.height * r.height})); })()""")
+    client.wait("/[0-9,]+ shares/.test(document.querySelector('#live-candle-chart .live-candle-hover').textContent)")
     client.evaluate("document.querySelector('[data-live-candle-full]').click()")
     client.wait("!document.querySelector('#live-report-dialog').open")
-    print("PASS radar rows open full-screen candles")
+    print("PASS radar stock panel opens full-screen candles with a hovered volume share label")
 
     client.evaluate("location.hash = 'dashboard'")
     client.wait("document.querySelectorAll('#results-table [data-candles]').length > 0")
@@ -334,7 +337,8 @@ def check_metric_null_sorting(client, app):
         return result
 
     try:
-        with patch.object(app.monitor, "snapshot", side_effect=serve_snapshot):
+        fixture_detail = lambda symbol: copy.deepcopy(next((row for row in fixture["rows"] if row["symbol"] == symbol), None))
+        with patch.object(app.monitor, "snapshot", side_effect=serve_snapshot), patch.object(app.monitor, "row_detail", side_effect=fixture_detail):
             client.call("Page.reload")
             client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === 4")
             assert client.evaluate("!document.querySelector('#live-extra-columns').checked && !!document.querySelector('#live-ranking-note')")
@@ -752,8 +756,21 @@ def check_alert_refresh(client, app, output):
     print('PASS explicit Refresh data completion without SSE, alerts saved during refresh, stopped inbox Refresh, duplicate suppression, failure preservation, and retry')
 
 
+def synthetic_candles(symbol, timeframe, before=None):
+    """Deterministic OHLCV bars ending now; paging back returns no older bars."""
+    step = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 86400}[timeframe]
+    end = int(time.time()) // step * step
+    candles = []
+    for i in range(0 if before else 120):
+        t = datetime.fromtimestamp(end - (119 - i) * step, timezone.utc)
+        base = 2 + (i % 17) * .01
+        candles.append({"t": t.isoformat(), "open": base, "high": base + .03, "low": base - .02, "close": base + .01, "volume": 1000 + i * 37})
+    return {"symbol": symbol, "timeframe": timeframe, "feed": "synthetic", "candles": candles}
+
+
 def run(output, chrome, alerts_only=False):
-    with tempfile.TemporaryDirectory(prefix="nomisma-browser-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="nomisma-browser-") as temporary, \
+            patch("nomisma.server.fetch_candles", side_effect=synthetic_candles):
         app = Application(Path(temporary) / "data")
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
         thread = threading.Thread(target=server.serve_forever, daemon=True)

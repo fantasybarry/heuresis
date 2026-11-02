@@ -632,6 +632,44 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(fake.send_json.call_args_list[1][0][0]["updatedBars"], ["ABCD"])
         fake.close.assert_called_once()
 
+    def test_sip_stream_adds_market_pulse_trades_without_touching_radar_channels(self):
+        stop = threading.Event()
+        fake = MagicMock()
+        ack = self.acknowledgment()
+        ack["trades"] = ["ABCD", "SPY"]
+        events = [{"T": "t", "S": "SPY", "p": 500}, {"T": "q", "S": "SPY", "bp": 1}, {"T": "t", "S": "ABCD", "p": 2}]
+        fake.message.side_effect = [[{"T": "success", "msg": "authenticated"}], [ack], events]
+        received = []
+
+        def receive(event):
+            received.append(event)
+            if event.get("S") == "ABCD":
+                stop.set()
+
+        with patch.dict(os.environ, dict(ENV, ALPACA_FEED="sip"), clear=True), patch.object(live, "_WebSocket", return_value=fake):
+            live.stream_live(["ABCD"], receive, stop, extra_trades=("SPY", "ABCD"))
+        subscribe = fake.send_json.call_args_list[1][0][0]
+        self.assertEqual(subscribe["trades"], ["ABCD", "SPY"])
+        self.assertEqual(subscribe["quotes"], ["ABCD"])
+        # The pulse symbol's trade is forwarded; its quote is not, since only trades were requested.
+        self.assertEqual([(event["T"], event["S"]) for event in received if event["T"] != "nomisma_subscription"], [("t", "SPY"), ("t", "ABCD")])
+
+    @patch.dict(os.environ, ENV, clear=True)
+    def test_iex_stream_skips_market_pulse_trades(self):
+        stop = threading.Event()
+        fake = MagicMock()
+        fake.message.side_effect = [[{"T": "success", "msg": "authenticated"}], [self.acknowledgment()], [{"T": "t", "S": "SPY", "p": 500}]]
+        received = []
+
+        def receive(event):
+            received.append(event)
+            stop.set()
+
+        with patch.object(live, "_WebSocket", return_value=fake):
+            live.stream_live(["ABCD"], receive, stop, extra_trades=("SPY",))
+        self.assertEqual(fake.send_json.call_args_list[1][0][0]["trades"], ["ABCD"])
+        self.assertFalse(any(event.get("S") == "SPY" for event in received))
+
     @patch.dict(os.environ, ENV, clear=True)
     def test_partial_subscription_or_pre_auth_data_never_marks_live(self):
         partial = self.acknowledgment()

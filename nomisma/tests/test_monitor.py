@@ -658,6 +658,17 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(bundle["assets"][0]["snapshot"]["tradingStatus"]["sc"], "H")
 
 
+class PulseTradeTests(unittest.TestCase):
+    def test_keeps_the_newest_valid_pulse_trade_and_reports_it(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        monitor = LiveMonitor(Store(temp.name))
+        now = datetime.now(timezone.utc)
+        for price, at in ((500.0, now), (499.0, now - timedelta(seconds=5)), (float("nan"), now), (0, now), (501.0, now + timedelta(minutes=5))):
+            monitor._pulse_trade({"T": "t", "S": "SPY", "p": price, "t": at.isoformat()})
+        self.assertEqual(monitor.snapshot()["pulse_trades"], {"SPY": {"price": 500.0, "t": now.isoformat()}})
+
+
 class MonitorHTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

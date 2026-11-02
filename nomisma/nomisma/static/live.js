@@ -33,7 +33,7 @@
     baseline:false, alertSource:null, seen:new Set(), freshSince:Date.now(), alertsKey:"", detailKey:"",
     notifications:false, notificationMessage:"", sound:false, audio:null, extraColumns:false,
     journal:{offset:0, limit:20, total:0, alerts:[], busy:false}, savedAlert:null,
-    discovery:null, candidateSort:"day_volume", candidates:new Set(), discoveryBusy:false, diagnosticsBusy:false,
+    discovery:null, candidateSort:"liquidity_volatility_score", candidates:new Set(), discoveryBusy:false, diagnosticsBusy:false,
     discoverySettings:null, discoveryStatus:null, discoveryResultId:null, discoveryPolling:false,
     discoveryTimer:null, manualDiscovery:false, scheduleBusy:false, discoveryLoading:false,
     selectedDetail:null, detailFetching:false, detailReceivedAt:0, tableKey:"", refreshing:false,
@@ -48,7 +48,7 @@
   const candleTime = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
   const nyDay = (value) => new Date(value).toLocaleDateString("en-CA", {timeZone:"America/New_York"});
   const screeningSortOptions = [
-    ["day_volume", "Total day volume"],
+    ["liquidity_volatility_score", "Liquidity & volatility rank"], ["day_volume", "Total day volume"],
     ["avg_volume_3m", "Average volume (3M)"], ["avg_daily_volume", "Average daily volume (20D)"],
     ["day_relative_volume", "Day relative volume"], ["spread_pct", "Bid–ask spread (%)"],
     ["beta", "Beta vs SPY"], ["atr", "Average true range ($)"], ["atr_pct", "Average true range (%)"]
@@ -180,11 +180,17 @@
     wrapper.innerHTML = `<table class="live-history-table live-candidate-table"><thead><tr><th>Select / symbol</th><th class="live-num">Price / day</th>${screeningHeaders()}<th>Data freshness</th></tr></thead><tbody>${rows.map((row) => `<tr><td><label class="live-candidate-choice"><input type="checkbox" data-live-candidate="${escapeHTML(row.symbol)}" aria-label="Select ${escapeHTML(row.symbol)}" ${view.candidates.has(row.symbol) ? "checked" : ""}><span><strong>${escapeHTML(row.symbol)}</strong><small>${escapeHTML(row.name || "")}</small></span></label></td><td class="live-num">${dollars(row.price)}<small class="${direction(row.change_pct)}">${pct(row.change_pct)}</small></td>${screeningCells(row)}<td>${escapeHTML(row.freshness || "Unavailable")}<small>${clock(row.trade_at)}</small>${row.volume_basis ? `<small>${escapeHTML(row.volume_basis.replaceAll("_", " "))}</small>` : ""}</td></tr>`).join("")}</tbody></table>`;
     candidateSelection();
   }
+  function rankingDetails(ranking) {
+    // Weights come from the search result, so the explanation always matches the ranking that produced it.
+    const labels = {...Object.fromEntries(screeningSortOptions), spread_pct:"Bid–ask spread (%) · narrower earns more", beta:"Beta vs SPY · positive earns more"};
+    const weights = Object.entries(ranking?.weights || {});
+    return `<details class="live-ranking-details"><summary>How the liquidity &amp; volatility rank works</summary><p>Each stock earns points for where each metric falls within this group${numeric(ranking?.pool_limit) ? ` of up to ${n(ranking.pool_limit)} stocks` : ""}. Missing metrics earn zero; the stock stays visible. ${ranking?.benchmark ? `Beta is measured against ${escapeHTML(ranking.benchmark)}. ` : ""}The rank favors activity and volatility. It does not predict direction or returns.</p>${weights.length ? `<ul>${weights.map(([key, weight]) => `<li><span>${escapeHTML(labels[key] || key)}</span><strong>${n(weight)} pts</strong></li>`).join("")}</ul>` : ""}</details>`;
+  }
   function renderDiscovery(data) {
     q("#live-discovery-progress").classList.remove("hidden");
     const coverage = data.coverage || {};
     q("#live-discovery-progress").textContent = `${sourceLabel(data.source, data.feed)} · ${data.universe_label || data.universe} · refreshed ${clock(data.as_of, true)} · market clock ${clock(data.market_as_of, true)} · session ${data.session_date || "unavailable"} · ${data.market_phase || ""}`;
-    q("#live-discovery-result").innerHTML = `<p class="live-coverage">${n(coverage.requested)} requested · ${n(coverage.received)} received · ${n(coverage.current_session)} current-session · ${n(coverage.matched)} matched · ${n(coverage.returned)} returned<br>${n(coverage.missing)} missing · ${n(coverage.stale)} stale · ${n(coverage.invalid)} invalid</p>${warningList(data.warnings)}${data.rows?.length && !data.rows.some((row) => numeric(row.liquidity_volatility_score)) ? '<p class="live-form-note">These saved candidates predate the liquidity and volatility metrics. Click Find candidates to calculate a fresh ranking.</p>' : ""}${data.rows?.length ? `<div class="live-candidate-toolbar"><label class="live-sort">Sort by<select id="live-candidate-sort">${sortOptions([["change_pct","Day change"],["symbol","Symbol A–Z"]])}</select></label><span>Highest to lowest · unavailable values last</span></div><div id="live-candidate-table-wrapper" class="live-table-scroll" tabindex="0" aria-label="Candidate liquidity and volatility metrics"></div>` : '<div class="live-alert-empty"><h3>No candidates match these filters</h3><p>Adjust the price, volume or day-change limits, or choose another universe.</p></div>'}`;
+    q("#live-discovery-result").innerHTML = `<p class="live-coverage">${n(coverage.requested)} requested · ${n(coverage.received)} received · ${n(coverage.current_session)} current-session · ${n(coverage.matched)} matched · ${n(coverage.returned)} returned<br>${n(coverage.missing)} missing · ${n(coverage.stale)} stale · ${n(coverage.invalid)} invalid</p>${warningList(data.warnings)}${data.rows?.length && !data.rows.some((row) => numeric(row.liquidity_volatility_score)) ? '<p class="live-form-note">These saved candidates predate the liquidity and volatility metrics. Click Find candidates to calculate a fresh ranking.</p>' : ""}${data.rows?.length ? rankingDetails(data.ranking) : ""}${data.rows?.length ? `<div class="live-candidate-toolbar"><label class="live-sort">Sort by<select id="live-candidate-sort">${sortOptions([["change_pct","Day change"],["symbol","Symbol A–Z"]])}</select></label><span>Highest to lowest · unavailable values last</span></div><div id="live-candidate-table-wrapper" class="live-table-scroll" tabindex="0" aria-label="Candidate liquidity and volatility metrics"></div>` : '<div class="live-alert-empty"><h3>No candidates match these filters</h3><p>Adjust the price, volume or day-change limits, or choose another universe.</p></div>'}`;
     if (q("#live-candidate-sort")) q("#live-candidate-sort").value = view.candidateSort;
     renderCandidateTable();
   }
@@ -474,7 +480,7 @@
     q("#live-alert-refresh-status").textContent = alertsRefreshing
       ? "Refreshing saved setup alerts…"
       : view.alertRefreshMessage || "Saved setups retain their original price and score.";
-    renderTable(); renderFocus(); renderAlerts(); renderNotificationNote(); renderFreshness();
+    renderTable(); renderFocus(); renderAlerts(); renderNotificationNote(); renderFreshness(); renderPulse();
     if (q("#live-discovery-dialog").open) candidateSelection();
     if (q("#live-report-dialog").open) fetchSelectedDetail();
   }
@@ -641,11 +647,22 @@
     catch (error) { view.pulseError = error.message; }
     renderPulse();
   }
+  const nyWeekday = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", weekday:"short"});
+  function livePulse(item) {
+    // The monitor's stream carries pulse trades; during regular hours they replace the 30-second snapshot price.
+    const trade = view.snapshot?.pulse_trades?.[item.symbol];
+    if (!trade) return item;
+    const time = new Date(trade.t), [hour, minute] = nyClock.format(time).split(":").map(Number), day = nyDay(time);
+    if (["Sat", "Sun"].includes(nyWeekday.format(time)) || hour * 60 + minute < 570 || hour >= 16 || (item.session_date && day < item.session_date)) return item;
+    // A new session's trade compares with the last close the snapshot showed; otherwise with that session's prior close.
+    const reference = !item.live && item.session_date && day > item.session_date ? item.price : item.previous_close;
+    return {...item, price:trade.price, change_pct:reference ? (trade.price / reference - 1) * 100 : null, live:true, streamed:true};
+  }
   function renderPulse() {
-    const quotes = view.pulse?.quotes || [], indexes = quotes.filter((item) => item.kind === "index"), movers = quotes.filter((item) => item.kind === "mover");
+    const quotes = (view.pulse?.quotes || []).map(livePulse), indexes = quotes.filter((item) => item.kind === "index"), movers = quotes.filter((item) => item.kind === "mover");
     const up = (list) => list.filter((item) => item.change_pct > 0).length;
     q("#live-pulse-summary").textContent = quotes.length ? `${up(indexes)} of ${indexes.length} indexes up · ${up(movers)} of ${movers.length} movers up · small caps (IWM) ${pct(indexes.find((item) => item.symbol === "IWM")?.change_pct)}` : "";
-    q("#live-pulse-note").textContent = view.pulseError ? (quotes.length ? `Update failed; showing ${clock(view.pulse.as_of)}` : "") : view.pulse?.quotes?.length ? `Index ETFs track each index · ${sourceLabel("alpaca", view.pulse.feed)} · ${quotes.some((item) => item.live) ? `live ${clock(view.pulse.as_of)}` : `closing prices ${date(quotes.find((item) => item.session_date)?.session_date)}`}` : view.pulse ? "" : "Loading index ETFs and market movers…";
+    q("#live-pulse-note").textContent = view.pulseError ? (quotes.length ? `Update failed; showing ${clock(view.pulse.as_of)}` : "") : view.pulse?.quotes?.length ? `Index ETFs track each index · ${sourceLabel("alpaca", view.pulse.feed)} · ${quotes.some((item) => item.streamed) ? "streaming live" : quotes.some((item) => item.live) ? `live ${clock(view.pulse.as_of)}` : `closing prices ${date(quotes.find((item) => item.session_date)?.session_date)}`}` : view.pulse ? "" : "Loading index ETFs and market movers…";
     if (!quotes.length) { replaceMarkup("#live-pulse", view.pulseError || view.pulse?.message ? `<p class="live-pulse-error">${escapeHTML(view.pulse?.message || `Market pulse is unavailable: ${view.pulseError}`)}</p>` : ""); return; }
     const spark = (values, change) => {
       if (values.length < 2) return "";

@@ -605,3 +605,9 @@ body .sidebar { display:none!important; }
   .live-sort select { flex:1; width:auto; }
   .live-rule-chips { padding:0 16px 16px; }
 }
+.live-ranking-details { margin:0 0 14px; padding:12px 14px; border:1px solid #e6eae3; border-radius:10px; background:#fafbf9; font-size:13px; color:#3c473e; }
+.live-ranking-details summary { cursor:pointer; font-weight:600; }
+.live-ranking-details p { margin-top:8px; line-height:1.6; color:var(--radar-muted); }
+.live-ranking-details ul { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:4px 20px; margin:10px 0 0; padding:0; list-style:none; }
+.live-ranking-details li { display:flex; justify-content:space-between; gap:12px; padding:4px 0; border-top:1px solid #eef1ea; }
+.live-ranking-details strong { font-family:var(--mono); }

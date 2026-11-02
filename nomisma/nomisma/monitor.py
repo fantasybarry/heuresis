@@ -13,7 +13,7 @@ import uuid
 from datetime import date, datetime, time as daytime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .live_data import LiveSubscriptionLimit, live_provider_status, load_live_seed, stream_live
+from .live_data import PULSE_SYMBOLS, LiveSubscriptionLimit, live_provider_status, load_live_seed, stream_live
 from .monitor_metrics import MAX_MONITOR_SYMBOLS, DEFAULT_MONITOR_CONFIG, _CLOCK_SKEW, _minutes, build_rows, demo_bundle, validate_monitor_config
 from .planner import freeze_plan
 from .pool import stream_pool
@@ -55,6 +55,7 @@ class LiveMonitor:
         self.computed_at = 0
         self.dirty = True
         self.minute_versions = {}
+        self.pulse_trades = {}
         self.connection_epoch = 0
         self.status = {"running": False, "connection": "stopped", "message": "Choose your symbols and start monitoring.",
                        "error": None, "source": self.config["source"], "feed": None, "updated_at": None,
@@ -109,6 +110,7 @@ class LiveMonitor:
             self.bundle = None
             self.rows = []
             self.minute_versions = {}
+            self.pulse_trades = {}
             self.dirty = True
             self.status = {"running": True, "connection": "loading", "message": "Loading session history and volume baselines…",
                            "error": None, "source": config["source"], "feed": None, "updated_at": None,
@@ -211,8 +213,10 @@ class LiveMonitor:
                         threading.Thread(target=self._reconcile, args=(config, generation, stop, epoch),
                                          name="nomisma-minute-reconcile", daemon=True).start()
 
-                stream = stream_pool if os.environ.get("NOMISMA_POOL", "").strip() else stream_live
-                stream(config["symbols"], lambda event: self._on_event(event, config, generation, stop), stop, on_status=on_status)
+                pooled = os.environ.get("NOMISMA_POOL", "").strip()
+                # The direct Alpaca stream also carries market pulse trades; the data pool serves radar symbols only.
+                (stream_pool if pooled else stream_live)(config["symbols"], lambda event: self._on_event(event, config, generation, stop), stop,
+                                                         on_status=on_status, **({} if pooled else {"extra_trades": PULSE_SYMBOLS}))
                 if stop.is_set():
                     return
                 raise ValueError("The market stream disconnected.")
@@ -374,6 +378,15 @@ class LiveMonitor:
                 self.dirty = True
         LOGGER.warning("Monitor failed (%s)", type(exc).__name__)
 
+    def _pulse_trade(self, event):
+        """Keep the newest valid trade per market pulse symbol (caller holds the lock)."""
+        price, stamp = event.get("p"), timestamp(event.get("t"))
+        if type(price) not in (int, float) or not math.isfinite(price) or price <= 0 or stamp is None or stamp > utcnow() + timedelta(seconds=5):
+            return
+        previous = self.pulse_trades.get(event["S"])
+        if previous is None or stamp >= timestamp(previous["t"]):
+            self.pulse_trades[event["S"]] = {"price": price, "t": stamp.isoformat()}
+
     def _on_event(self, event, config, generation, stop):
         with self.lock:
             if not self._active(generation, stop) or not self.bundle or not isinstance(event, dict):
@@ -384,6 +397,8 @@ class LiveMonitor:
                 self.dirty = True
                 return
             symbol = event.get("S")
+            if event.get("T") == "t" and symbol in PULSE_SYMBOLS:
+                self._pulse_trade(event)
             asset = next((item for item in self.bundle["assets"] if item["symbol"] == symbol), None)
             if asset is None:
                 return
@@ -678,6 +693,8 @@ class LiveMonitor:
             result = {"config": copy.deepcopy(self.config), "status": copy.deepcopy(self.status),
                       "rows": copy.deepcopy(rows), "limits": {"max_symbols": MAX_MONITOR_SYMBOLS}}
             result["status"]["refresh"] = copy.deepcopy(self.refresh_status)
+        with self.lock:
+            result["pulse_trades"] = copy.deepcopy(self.pulse_trades)
         result["alerts"] = self.store.monitor_alerts(source=result["config"]["source"])
         result["provider_status"] = live_provider_status()
         return result

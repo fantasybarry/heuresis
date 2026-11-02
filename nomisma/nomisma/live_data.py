@@ -297,6 +297,7 @@ def fetch_candles(symbol, timeframe, before=None):
 # Alpaca streams ETFs, not index values, so each index is followed through the ETF that tracks it.
 PULSE_INDEXES = (("SPY", "S&P 500"), ("QQQ", "Nasdaq-100"), ("DIA", "Dow Jones"), ("IWM", "Russell 2000"))
 PULSE_MOVERS = ("NVDA", "MSFT", "AAPL", "AMZN", "GOOGL", "META", "AVGO", "TSLA")
+PULSE_SYMBOLS = tuple(symbol for symbol, _ in PULSE_INDEXES) + PULSE_MOVERS
 
 
 def _number(value):
@@ -800,13 +801,20 @@ def _stream_error(event):
     return error_type("Alpaca stream: {}.".format(reason))
 
 
-def stream_live(symbols, on_event, stop_event, on_status=None):
-    """One authenticated stream session; root performs reconnect and reseeding."""
+def stream_live(symbols, on_event, stop_event, on_status=None, extra_trades=()):
+    """One authenticated stream session; root performs reconnect and reseeding.
+
+    `extra_trades` adds trade-only subscriptions (the market pulse) on the SIP feed, whose
+    plans have no symbol cap; IEX plans allow 30 symbols, so extras would risk the radar.
+    """
     connection = None
     try:
         _check_stop(stop_event)
         symbols = _symbols(symbols)
         status, headers, unused_account = _credentials()
+        extras = [symbol for symbol in dict.fromkeys(providers._symbol(value) for value in extra_trades)
+                  if symbol not in symbols] if status["feed"] == "sip" else []
+        expected = {channel: set(symbols) | (set(extras) if channel == "trades" else set()) for channel in _CHANNELS}
         if on_status:
             on_status("connecting")
         connection = _WebSocket(status["feed"], stop_event)
@@ -845,12 +853,11 @@ def stream_live(symbols, on_event, stop_event, on_status=None):
                 if kind == "success" and event.get("msg") == "authenticated" and not authenticated:
                     authenticated = True
                     connection.send_json(dict({"action": "subscribe"}, **{
-                        channel: symbols for channel in _CHANNELS}))
+                        channel: symbols + extras if channel == "trades" else symbols for channel in _CHANNELS}))
                     deadline = time.monotonic() + 10
                 elif kind == "subscription":
-                    requested = set(symbols)
                     if (not authenticated or any(not isinstance(event.get(channel), list)
-                            or requested != set(value for value in event[channel] if isinstance(value, str))
+                            or expected[channel] != set(value for value in event[channel] if isinstance(value, str))
                             for channel in _CHANNELS)):
                         raise ValueError("Alpaca did not confirm all requested live data subscriptions.")
                     if not subscribed:
@@ -870,7 +877,7 @@ def stream_live(symbols, on_event, stop_event, on_status=None):
                 elif kind in ("t", "q", "b", "u", "d", "c", "x", "s", "l"):
                     if not subscribed:
                         raise ValueError("Alpaca sent market events before confirming the subscription.")
-                    if event.get("S") in symbols:
+                    if event.get("S") in symbols or (kind == "t" and event.get("S") in extras):
                         on_event(event)
     except _Cancelled:
         return
