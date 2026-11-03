@@ -288,6 +288,7 @@ def fetch_candles(symbol, timeframe, before=None):
                                         "close": raw["c"], "volume": raw["v"]}, symbol)
             bar.pop("date")
             bar["t"] = _stamp(raw["t"]).isoformat()
+            bar["vw"] = _number(raw.get("vw"))
         except (ValueError, KeyError, TypeError, AttributeError):
             raise ValueError("Alpaca returned an invalid {} candle for {}.".format(timeframe, symbol)) from None
         candles.append(bar)
@@ -500,27 +501,14 @@ def load_live_seed(symbols, progress=None, stop_event=None, refresh=False):
     if (not isinstance(snapshots, dict) or any(key not in symbols for key in snapshots)
             or any(value is not None and not isinstance(value, dict) for value in snapshots.values())):
         raise ValueError("Alpaca returned invalid stock snapshots.")
-    needs_extended = []
-    for symbol in symbols:
-        raw_day = (snapshots.get(symbol) or {}).get("dailyBar") or {}
-        raw_day = raw_day if isinstance(raw_day, dict) else {}
-        try:
-            stamp = _stamp(raw_day.get("t"))
-            volume = raw_day.get("v")
-            current_day = (stamp <= _now() and stamp.astimezone(_NY).date() == date.fromisoformat(session["date"])
-                           and type(volume) in (int, float) and math.isfinite(volume) and 0 <= volume <= 1e12)
-        except (ValueError, TypeError):
-            current_day = False
-        if not current_day:
-            needs_extended.append(symbol)
+    # Extended-hours minutes back the premarket day volume and the session VWAP, which starts at 4 a.m.
     extended = {}
-    if needs_extended:
-        try:
-            extended = extended_day_volumes(needs_extended, session, _now(), status["feed"], headers, stop_event)
-        except _Cancelled:
-            raise
-        except ValueError:
-            warnings.append("Extended-hours minute volume could not be loaded. Total day volume remains unavailable where no current provider daily bar is present.")
+    try:
+        extended = extended_day_volumes(symbols, session, _now(), status["feed"], headers, stop_event)
+    except _Cancelled:
+        raise
+    except ValueError:
+        warnings.append("Extended-hours minutes could not be loaded. Session VWAP, which includes pre-market trading, and premarket day volume remain unavailable.")
     assets = []
     for symbol in symbols:
         snapshot = snapshots.get(symbol) or {}

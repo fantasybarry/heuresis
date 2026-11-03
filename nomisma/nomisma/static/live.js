@@ -37,7 +37,7 @@
     discoverySettings:null, discoveryStatus:null, discoveryResultId:null, discoveryPolling:false,
     discoveryTimer:null, manualDiscovery:false, scheduleBusy:false, discoveryLoading:false,
     selectedDetail:null, detailFetching:false, detailReceivedAt:0, tableKey:"", refreshing:false,
-    alertsRefreshing:false, alertRefreshMessage:"", focus:null, focusDetail:null, focusFetching:false, focusTf:"1Min", focusCandles:null, pulse:null, pulseError:"", candleTf:"5Min", candles:null, candleFetching:false, candleZoom:120, candleOffset:0, candleDrag:null, candleFull:false
+    alertsRefreshing:false, alertRefreshMessage:"", focus:null, focusDetail:null, focusFetching:false, focusTf:"1Min", focusCandles:null, pulse:null, pulseError:"", candleTf:"5Min", candles:null, candleFetching:false, candleZoom:120, candleOffset:0, candleScale:1, candleDrag:null, candleFull:false
   };
   const candleFrames = [["1Min", "1m", 60e3], ["5Min", "5m", 300e3], ["15Min", "15m", 900e3], ["1Hour", "1h", 3600e3], ["1Day", "1D", 0]];
   const nyClock = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
@@ -86,7 +86,7 @@
           <div id="live-table" class="live-table-scroll" tabindex="0" aria-label="Live stock metrics"></div>
           <div class="live-table-footer"><span id="live-ranking-note">Auto-scan replaces the radar every 5 minutes until the 4:00 p.m. close.</span><span>Technicals use completed 1-minute bars · total day volume includes premarket</span></div>
           <div id="live-warnings" class="live-warnings hidden"></div>
-          <details class="live-definitions"><summary>Read the numbers</summary><div><p><strong>Total day volume</strong> includes the provider’s available premarket and regular-session trading; it continues through available after-hours trading. It does not reset at the opening bell. Volumes reflect the selected feed’s coverage.</p><p><strong>Average volume (3M)</strong> uses 63 prior trading sessions. <strong>Average daily volume (20D)</strong> uses 20 prior sessions. Both exclude today. <strong>Day RVOL</strong> is total day volume ÷ the 20-session average; it is not adjusted for time of day.</p><p><strong>Bid–ask spread</strong> shows ask minus bid in dollars and as a percentage of their midpoint. A narrower spread earns more liquidity points. Quotes older than 30 seconds are unavailable for screening.</p><p><strong>Beta</strong> estimates sensitivity to SPY using up to 252 paired daily price returns, with at least 60 required. <strong>ATR (14)</strong> uses Wilder’s average true range of completed daily bars. ATR% divides it by the prior close so different stock prices can be compared.</p><p><strong>Regular-session volume and VWAP</strong> use completed regular-session minutes. <strong>1-minute RVOL</strong> is the latest completed minute’s volume ÷ the preceding 20-minute average and drives the minute-volume alert filter.</p><p><strong>30D avg / total</strong> use 30 prior sessions. <strong>Session RVOL</strong> compares regular-session volume with that full-session average. <strong>Gap</strong> compares the regular-session opening price with the prior adjusted close. <strong>Float</strong> is sourced and dated separately. A dash means unavailable.</p></div></details>
+          <details class="live-definitions"><summary>Read the numbers</summary><div><p><strong>Total day volume</strong> includes the provider’s available premarket and regular-session trading; it continues through available after-hours trading. It does not reset at the opening bell. Volumes reflect the selected feed’s coverage.</p><p><strong>Average volume (3M)</strong> uses 63 prior trading sessions. <strong>Average daily volume (20D)</strong> uses 20 prior sessions. Both exclude today. <strong>Day RVOL</strong> is total day volume ÷ the 20-session average; it is not adjusted for time of day.</p><p><strong>Bid–ask spread</strong> shows ask minus bid in dollars and as a percentage of their midpoint. A narrower spread earns more liquidity points. Quotes older than 30 seconds are unavailable for screening.</p><p><strong>Beta</strong> estimates sensitivity to SPY using up to 252 paired daily price returns, with at least 60 required. <strong>ATR (14)</strong> uses Wilder’s average true range of completed daily bars. ATR% divides it by the prior close so different stock prices can be compared.</p><p><strong>Regular-session volume</strong> uses completed regular-session minutes. <strong>Session VWAP</strong> runs from the 4 a.m. pre-market open, so completed pre-market minutes count too. <strong>1-minute RVOL</strong> is the latest completed minute’s volume ÷ the preceding 20-minute average and drives the minute-volume alert filter.</p><p><strong>30D avg / total</strong> use 30 prior sessions. <strong>Session RVOL</strong> compares regular-session volume with that full-session average. <strong>Gap</strong> compares the regular-session opening price with the prior adjusted close. <strong>Float</strong> is sourced and dated separately. A dash means unavailable.</p></div></details>
         </section>
         <aside class="live-alert-rail" aria-label="Selected stock and setup alerts">
           <section class="live-focus" id="live-focus" aria-label="Selected stock"></section>
@@ -722,17 +722,21 @@
     const raw = span / count, power = 10 ** Math.floor(Math.log10(raw)), unit = raw / power;
     return power * (unit < 1.5 ? 1 : unit < 3 ? 2 : unit < 7 ? 5 : 10);
   }
-  function candleChart(points, ms, width = 760, height = 320, first = 0) {
+  const candleRoom = 8;  // empty candle slots kept right of the newest candle
+  function candleChart(points, ms, ahead, width = 760, height = 320, first = 0) {
     view.candleGeo = null;
     if (!points.length) return '<p class="live-chart-empty">Alpaca returned no candles for this timeframe.</p>';
     const left = 12, right = 70, top = 10, priceBottom = height - 104, volumeTop = height - 84, volumeBottom = height - 26;
-    const low = Math.min(...points.map((bar) => bar.low)), high = Math.max(...points.map((bar) => bar.high)), pad = Math.max((high - low) * .06, high * .001, .005);
-    const min = low - pad, max = high + pad, step = (width - left - right) / points.length, body = Math.max(1, step * .7);
+    const vwaps = points.map((bar) => bar.vwap).filter(numeric);
+    const low = Math.min(...points.map((bar) => bar.low), ...vwaps), high = Math.max(...points.map((bar) => bar.high), ...vwaps), pad = Math.max((high - low) * .06, high * .001, .005);
+    // Dragging the price axis scales the auto-fitted range around its middle (above 1 squashes candles, below 1 stretches them).
+    const mid = (high + low) / 2, half = ((high - low) / 2 + pad) * view.candleScale;
+    const min = mid - half, max = mid + half, step = (width - left - right) / (points.length + ahead + candleRoom), body = Math.max(1, step * .7);
     const x = (i) => left + step * (i + .5);
     const y = (price) => top + (max - price) / (max - min) * (priceBottom - top);
     const maxVolume = Math.max(1, ...points.map((bar) => bar.volume || 0));
     const label = (t) => escapeHTML((ms ? candleTime : axisFormats[3]).format(new Date(t)));
-    const last = points[points.length - 1], lastY = y(last.close), lastColor = last.close >= (points[points.length - 2]?.close ?? last.open) ? "#39704b" : "#b4553f";
+    const last = points[points.length - 1], lastY = Math.max(top, Math.min(priceBottom, y(last.close))), lastColor = last.close >= (points[points.length - 2]?.close ?? last.open) ? "#39704b" : "#b4553f";
     const tick = niceStep(max - min, Math.max(3, Math.round((priceBottom - top) / 60)));
     let grid = "";
     for (let value = Math.ceil(min / tick) * tick; value <= max; value += tick) {
@@ -750,8 +754,10 @@
     });
     const candles = points.map((bar, i) => {
       const up = bar.close >= bar.open, color = up ? "#39704b" : "#b4553f", h = (bar.volume || 0) / maxVolume * (volumeBottom - volumeTop);
-      return `<g><line x1="${x(i)}" x2="${x(i)}" y1="${y(bar.high)}" y2="${y(bar.low)}" stroke="${color}" vector-effect="non-scaling-stroke"/><rect x="${x(i) - body / 2}" y="${y(Math.max(bar.open, bar.close))}" width="${body}" height="${Math.max(1, Math.abs(y(bar.open) - y(bar.close)))}" fill="${color}"/><rect x="${x(i) - body / 2}" y="${volumeBottom - h}" width="${body}" height="${h}" fill="${up ? "#9ab68c" : "#c5a391"}"/></g>`;
-    }).join("");
+      return [`<line x1="${x(i)}" x2="${x(i)}" y1="${y(bar.high)}" y2="${y(bar.low)}" stroke="${color}" vector-effect="non-scaling-stroke"/><rect x="${x(i) - body / 2}" y="${y(Math.max(bar.open, bar.close))}" width="${body}" height="${Math.max(1, Math.abs(y(bar.open) - y(bar.close)))}" fill="${color}"/>`, `<rect x="${x(i) - body / 2}" y="${volumeBottom - h}" width="${body}" height="${h}" fill="${up ? "#9ab68c" : "#c5a391"}"/>`];
+    });
+    const vwapPath = points.map((bar, i) => numeric(bar.vwap) ? `${numeric(points[i - 1]?.vwap) ? "L" : "M"}${x(i)} ${y(bar.vwap)}` : "").join("");
+    const vwapLine = vwapPath ? `<path d="${vwapPath}" fill="none" stroke="#aa7c35" stroke-width="1.5" vector-effect="non-scaling-stroke"/>` : "";
     const sessions = points.map((bar) => ms ? barSession(bar.t) : "");
     let bands = "";
     for (let i = 0, j; i < sessions.length; i = j) {
@@ -759,7 +765,7 @@
       if (sessions[i]) bands += `<rect x="${left + step * i}" y="${top}" width="${step * (j - i)}" height="${volumeBottom - top}" fill="${sessionFill[sessions[i]]}" opacity=".45"/>`;
     }
     view.candleGeo = {points, sessions, label, width, height, left, right, top, step, priceBottom, volumeTop, volumeBottom, min, max, maxVolume};
-    return `<svg viewBox="0 0 ${width} ${height}" class="live-price-chart" tabindex="0" role="img" aria-label="${points.length} candles from ${label(points[0].t)} to ${label(last.t)}. Last close ${dollars(last.close)}.">${bands}${grid}${axis}<line x1="${left}" x2="${width - right}" y1="${volumeTop - 6}" y2="${volumeTop - 6}" stroke="#dce5d9"/>${candles}<line x1="${left}" x2="${width - right}" y1="${lastY}" y2="${lastY}" stroke="${lastColor}" stroke-dasharray="2 3" opacity=".7"/><rect x="${width - right + 4}" y="${lastY - 9}" width="${right - 6}" height="18" rx="3" fill="${lastColor}"/><text x="${width - right + 9}" y="${lastY + 4}" fill="#fff" font-size="11">${priceText(last.close)}</text><text x="${left + 4}" y="${volumeTop + 6}" fill="#8a987c" font-size="10">Volume</text><text x="${width - right + 10}" y="${volumeTop + 8}" fill="#637360" font-size="11">${short(maxVolume)}</text><g class="live-candle-hover" pointer-events="none">${candleHover().svg}</g></svg>`;
+    return `<svg viewBox="0 0 ${width} ${height}" class="live-price-chart" tabindex="0" role="img" aria-label="${points.length} candles from ${label(points[0].t)} to ${label(last.t)}. Last close ${dollars(last.close)}.">${bands}${grid}${axis}<line x1="${left}" x2="${width - right}" y1="${volumeTop - 6}" y2="${volumeTop - 6}" stroke="#dce5d9"/><clipPath id="live-price-clip"><rect x="${left}" y="${top}" width="${width - left - right}" height="${priceBottom - top}"/></clipPath>${candles.map(([, volume]) => volume).join("")}<g clip-path="url(#live-price-clip)">${candles.map(([price]) => price).join("")}${vwapLine}</g><line x1="${left}" x2="${width - right}" y1="${lastY}" y2="${lastY}" stroke="${lastColor}" stroke-dasharray="2 3" opacity=".7"/><rect x="${width - right + 4}" y="${lastY - 9}" width="${right - 6}" height="18" rx="3" fill="${lastColor}"/><text x="${width - right + 9}" y="${lastY + 4}" fill="#fff" font-size="11">${priceText(last.close)}</text>${vwapPath ? `<text x="${left + 4}" y="${top + 12}" fill="#aa7c35" font-size="10" font-weight="600">VWAP</text>` : ""}<text x="${left + 4}" y="${volumeTop + 6}" fill="#8a987c" font-size="10">Volume</text><rect class="live-price-axis" x="${width - right}" y="${top}" width="${right}" height="${priceBottom - top}" fill="transparent"><title>Drag up or down to scale prices; double-click to fit</title></rect><text x="${width - right + 10}" y="${volumeTop + 8}" fill="#637360" font-size="11">${short(maxVolume)}</text><g class="live-candle-hover" pointer-events="none">${candleHover().svg}</g></svg>`;
   }
   function candleHover() {
     // Crosshair for the candle under the pointer; the readout shows the newest candle when not hovering.
@@ -767,7 +773,7 @@
     if (!g) return {svg:"", text:""};
     const i = h ? Math.max(0, Math.min(g.points.length - 1, Math.floor((h.x - g.left) / g.step))) : g.points.length - 1;
     const bar = g.points[i], base = g.points[i - 1]?.close ?? bar.open, change = base ? (bar.close - base) / base * 100 : null;
-    const text = `<span class="live-readout-time">${g.label(bar.t)}${g.sessions[i] ? ` · ${sessionName[g.sessions[i]]}` : ""}${bar.forming ? " · forming" : ""}</span><strong class="live-readout-price">${dollars(bar.close)}</strong><span class="live-readout-change ${direction(change)}">${pct(change)}</span><span>Open <b>${dollars(bar.open)}</b></span><span>High <b>${dollars(bar.high)}</b></span><span>Low <b>${dollars(bar.low)}</b></span><span>Volume <b>${short(bar.volume)}</b></span>`;
+    const text = `<span class="live-readout-time">${g.label(bar.t)}${g.sessions[i] ? ` · ${sessionName[g.sessions[i]]}` : ""}${bar.forming ? " · forming" : ""}</span><strong class="live-readout-price">${dollars(bar.close)}</strong><span class="live-readout-change ${direction(change)}">${pct(change)}</span><span>Open <b>${dollars(bar.open)}</b></span><span>High <b>${dollars(bar.high)}</b></span><span>Low <b>${dollars(bar.low)}</b></span><span>Volume <b>${short(bar.volume)}</b></span>${numeric(bar.vwap) ? `<span>VWAP <b>${dollars(bar.vwap)}</b></span>` : ""}`;
     if (!h) return {svg:"", text};
     const x = g.left + g.step * (i + .5), tag = (y, value, fill) => `<line x1="${g.left}" x2="${g.width - g.right}" y1="${y}" y2="${y}" stroke="#637360" stroke-dasharray="3 3" opacity=".6"/><rect x="${g.width - g.right + 4}" y="${y - 9}" width="${g.right - 6}" height="18" rx="3" fill="${fill}"/><text x="${g.width - g.right + 9}" y="${y + 4}" fill="#fff" font-size="11">${value}</text>`;
     const price = g.max - (h.y - g.top) / (g.priceBottom - g.top) * (g.max - g.min);
@@ -786,23 +792,38 @@
     if (layer) layer.innerHTML = svg;
     if (readout) readout.innerHTML = text;
   }
+  function sessionVwap(bars) {
+    // Extended-hours VWAP from Alpaca's per-bar VWAP, reset each New York day at the 4 a.m. pre-market open.
+    // A day is drawn only when its first bar is loaded: the previous loaded bar is from an earlier day, or it starts at 4:00.
+    let day = "", value = 0, volume = 0, whole = false;
+    return bars.map((bar, i) => {
+      if (nyDay(bar.t) !== day) {
+        day = nyDay(bar.t); value = volume = 0;
+        whole = i > 0 || nyClock.format(new Date(bar.t)) <= "04:00";
+      }
+      value += (bar.vw ?? (bar.high + bar.low + bar.close) / 3) * (bar.volume || 0);
+      volume += bar.volume || 0;
+      return whole && volume ? {...bar, vwap:value / volume} : bar;
+    });
+  }
   function candleBody(row) {
     const ms = candleFrames.find(([tf]) => tf === view.candleTf)[2];
     const data = view.candles?.key === `${row.symbol}|${view.candleTf}` ? view.candles : null;
     if (!data) return '<p class="live-chart-empty">Loading candles…</p>';
-    const all = withLivePrice(data.bars, row, ms);
+    const bars = withLivePrice(data.bars, row, ms), all = ms ? sessionVwap(bars) : bars;
     const count = Math.min(Math.round(view.candleZoom), all.length);
-    view.candleOffset = Math.max(0, Math.min(view.candleOffset, all.length - count));
-    const stop = all.length - Math.round(view.candleOffset);
+    // A negative offset drags the newest candle left, leaving empty slots for upcoming candles (at least a tenth stay visible).
+    view.candleOffset = Math.max(-Math.floor(count * .9), Math.min(view.candleOffset, all.length - count));
+    const stop = all.length - Math.round(view.candleOffset), ahead = Math.max(0, stop - all.length);
     const note = data.loadingOlder ? "Loading older candles…" : data.exhausted && stop - count === 0 ? "Start of available history." : "";
-    const chart = all.length || !data.error ? candleChart(all.slice(stop - count, stop), ms, ...(view.candleFull ? [Math.max(400, Math.round((innerWidth - 48) / 1.4)), Math.max(240, Math.round((innerHeight - 170) / 1.4))] : [760, 320]), stop - count) : "";
+    const chart = all.length || !data.error ? candleChart(all.slice(stop - count, stop), ms, ahead, ...(view.candleFull ? [Math.max(400, Math.round((innerWidth - 48) / 1.4)), Math.max(240, Math.round((innerHeight - 170) / 1.4))] : [760, 320]), stop - count) : "";
     return `${data.error ? `<p class="live-chart-empty">Candles unavailable: ${escapeHTML(data.error)}</p>` : ""}<div id="live-candle-readout" class="live-candle-readout" aria-hidden="true">${candleHover().text}</div>${chart}<div class="live-candle-nav"><span>${ms ? `<span class="live-session-key"><i style="background:${sessionFill.pre}"></i>Pre-market<i></i>Regular<i style="background:${sessionFill.post}"></i>After-hours</span>` : ""}${note}</span><span class="live-tf-group">${Math.round(view.candleOffset) ? '<button type="button" class="button subtle" data-live-candle-latest>Jump to latest ›</button>' : ""}<button type="button" class="button subtle" data-live-candle-zoom="1.25" aria-label="Zoom out" title="Zoom out (−)">−</button><button type="button" class="button subtle" data-live-candle-zoom="0.8" aria-label="Zoom in" title="Zoom in (+)">+</button></span></div>`;
   }
   function candleSection(row) {
     if (row.source !== "alpaca") return "";
     const buttons = candleFrames.map(([tf, text]) => `<button type="button" class="button subtle" data-live-tf="${tf}" aria-pressed="${tf === view.candleTf}">${text}</button>`).join("");
     const exit = row.chartOnly ? "✕ Close" : view.candleFull ? "Exit full screen" : "Full screen";
-    return `<section class="live-report-section${view.candleFull ? " live-candle-full" : ""}"><div class="live-report-section-title"><h3>${view.candleFull ? `${escapeHTML(row.symbol)} <span>Candles · Alpaca, extended hours included</span>` : "Candles"}</h3><div class="live-tf-group"><div class="live-tf-group live-tf-segment" role="group" aria-label="Candle timeframe">${buttons}</div><button type="button" class="button subtle" data-live-candle-full>${exit}</button></div></div><div id="live-candle-chart" class="live-candle-chart">${candleBody(row)}</div><p class="field-help live-candle-help"><span>Drag or ←/→ to scroll back</span><span>${view.candleFull ? "Scroll" : "⌘/Ctrl + scroll"}, pinch or +/− to zoom</span><span>Double-click to reset</span>${view.candleFull ? "<span>Esc to close</span>" : ""}<span>Updates every 15 seconds</span></p></section>`;
+    return `<section class="live-report-section${view.candleFull ? " live-candle-full" : ""}"><div class="live-report-section-title"><h3>${view.candleFull ? `${escapeHTML(row.symbol)} <span>Candles · Alpaca, extended hours included</span>` : "Candles"}</h3><div class="live-tf-group"><div class="live-tf-group live-tf-segment" role="group" aria-label="Candle timeframe">${buttons}</div><button type="button" class="button subtle" data-live-candle-full>${exit}</button></div></div><div id="live-candle-chart" class="live-candle-chart">${candleBody(row)}</div><p class="field-help live-candle-help"><span>Drag or ←/→ to scroll; drag left past the newest candle for room ahead</span><span>${view.candleFull ? "Scroll" : "⌘/Ctrl + scroll"}, pinch or +/− to zoom</span><span>Drag the price axis to stretch or squash</span><span>Double-click to reset</span>${view.candleFull ? "<span>Esc to close</span>" : ""}<span>Updates every 15 seconds</span></p></section>`;
   }
   function renderCandles() {
     const box = q("#live-candle-chart");
@@ -814,7 +835,7 @@
   }
   function moveCandles(offset, zoom = view.candleZoom) {
     view.candleZoom = Math.max(20, Math.min(800, zoom));
-    view.candleOffset = Math.max(0, offset);
+    view.candleOffset = offset;
     // Gestures fire faster than the chart can redraw, so redraw at most once per frame.
     view.candleFrame ||= requestAnimationFrame(() => { view.candleFrame = 0; renderCandles(); });
   }
@@ -915,7 +936,7 @@
       <div class="live-report-source ${row.source === "demo" ? "synthetic" : ""}"><strong>${escapeHTML(sourceLabel(row.source, row.feed))}</strong><span>Session ${date(row.session_date)} · Price ${clock(row.price_at, true)}</span>${row.source === "demo" ? '<p>All values are fictional simulation data.</p>' : ""}</div>
       <div class="live-report-price"><div><strong>${dollars(row.price)}</strong><span class="${direction(row.change_pct)}">${pct(row.change_pct)} today</span></div><div><span class="live-setup ${levelClass(row.signal)}">${setup(row.signal)}</span><span>${n(row.signal_score)} / 100</span></div></div>
       <div class="live-feed-volume"><strong>Total day volume: ${n(row.day_volume)} shares</strong><span>Includes available premarket and regular trading · updated ${clock(row.day_volume_at)}${(row.day_volume_basis || row.volume_basis) ? " · " + escapeHTML((row.day_volume_basis || row.volume_basis).replaceAll("_", " ")) : ""}</span></div>${screeningReport(row)}
-      <dl class="live-report-metrics">${reportMetric("Regular-session volume", n(row.session_volume), "Completed regular-session minute bars; premarket excluded from this technical measure")}${reportMetric("Float shares", n(row.float_shares), numeric(row.float_shares) ? `${row.float_source || "Source unavailable"} · as of ${row.float_as_of || "date unavailable"}` : "No usable dated float source")}${reportMetric("30-session average volume", n(row.avg_volume_30d), "30 prior trading sessions; excludes today")}${reportMetric("30-session total volume", n(row.volume_30d_total), "30 prior trading sessions; excludes today")}${reportMetric("Session relative volume", ratio(row.relative_volume), "Versus full-session 30D average; not time adjusted")}${reportMetric("1-minute relative volume", ratio(row.minute_relative_volume), "Latest completed minute / preceding 20 minutes")}${reportMetric("Opening gap", pct(row.gap_pct), "Regular open versus prior adjusted close", direction(row.gap_pct))}${reportMetric("Float turnover", ratio(row.float_turnover), "Session volume / dated float shares")}${reportMetric("Bid–ask spread", numeric(row.spread_pct) ? `${n(row.spread_pct, 2)}%` : "—", `Quote ${clock(row.quote_at)}`)}${reportMetric("Session VWAP", dollars(row.vwap), "Volume-weighted regular-session minute bars")}${reportMetric("EMA 9 / EMA 20", `${dollars(row.ema9)} / ${dollars(row.ema20)}`, "Completed minute closes")}${reportMetric("RSI", n(row.rsi, 1), "Minute momentum oscillator")}${tradingStatusMetrics(row)}</dl>
+      <dl class="live-report-metrics">${reportMetric("Regular-session volume", n(row.session_volume), "Completed regular-session minute bars; premarket excluded from this technical measure")}${reportMetric("Float shares", n(row.float_shares), numeric(row.float_shares) ? `${row.float_source || "Source unavailable"} · as of ${row.float_as_of || "date unavailable"}` : "No usable dated float source")}${reportMetric("30-session average volume", n(row.avg_volume_30d), "30 prior trading sessions; excludes today")}${reportMetric("30-session total volume", n(row.volume_30d_total), "30 prior trading sessions; excludes today")}${reportMetric("Session relative volume", ratio(row.relative_volume), "Versus full-session 30D average; not time adjusted")}${reportMetric("1-minute relative volume", ratio(row.minute_relative_volume), "Latest completed minute / preceding 20 minutes")}${reportMetric("Opening gap", pct(row.gap_pct), "Regular open versus prior adjusted close", direction(row.gap_pct))}${reportMetric("Float turnover", ratio(row.float_turnover), "Session volume / dated float shares")}${reportMetric("Bid–ask spread", numeric(row.spread_pct) ? `${n(row.spread_pct, 2)}%` : "—", `Quote ${clock(row.quote_at)}`)}${reportMetric("Session VWAP", dollars(row.vwap), "Volume-weighted minute bars since the 4 a.m. pre-market open")}${reportMetric("EMA 9 / EMA 20", `${dollars(row.ema9)} / ${dollars(row.ema20)}`, "Completed minute closes")}${reportMetric("RSI", n(row.rsi, 1), "Minute momentum oscillator")}${tradingStatusMetrics(row)}</dl>
       ${candleSection(row)}
       <section class="live-report-section"><div class="live-report-section-title"><h3>Intraday price</h3><span>Completed 1-minute closes</span></div>${lineChart(row.chart, (view.snapshot.alerts || []).filter((alert) => alert.symbol === row.symbol && alert.source === row.source && alert.session_date === row.session_date))}</section>
       <section class="live-report-section"><div class="live-report-section-title"><h3>Participation over 30 sessions</h3><span>Prior sessions · today excluded</span></div>${volumeChart(history)}<details id="live-history-details" ${historyOpen ? "open" : ""}><summary>Show exact daily volumes (${history.length} sessions)</summary><table class="live-history-table"><thead><tr><th>Trading session</th><th class="live-num">Volume (shares)</th></tr></thead><tbody>${history.map((bar) => `<tr><td>${date(bar.date)}</td><td class="live-num">${n(bar.volume)}</td></tr>`).join("")}</tbody></table></details></section>
@@ -932,6 +953,7 @@
     view.selectedDetail = {price:live?.price, price_at:live?.price_at, symbol, source:"alpaca", chartOnly:true};
     view.candleFull = true;
     view.candleOffset = 0;
+    view.candleScale = 1;
     view.candleHover = null;
     q("#live-report-title").textContent = `${symbol} · Candles`;
     renderReport(true);
@@ -1325,7 +1347,7 @@
       const ack = event.target.closest("[data-live-ack]");
       if (ack) acknowledge({id:ack.dataset.liveAck});
       const frame = event.target.closest("[data-live-tf]");
-      if (frame) { view.candleTf = frame.dataset.liveTf; view.candleOffset = 0; renderReport(true); loadCandles(true); }
+      if (frame) { view.candleTf = frame.dataset.liveTf; view.candleOffset = 0; view.candleScale = 1; renderReport(true); loadCandles(true); }
       if (event.target.closest("[data-live-candle-latest]")) moveCandles(0);
       if (event.target.closest("[data-live-candle-full]") && view.selectedDetail?.chartOnly) q("#live-report-dialog").close();
       else if (event.target.closest("[data-live-candle-full]")) {
@@ -1336,7 +1358,11 @@
       const zoom = event.target.closest("[data-live-candle-zoom]");
       if (zoom) zoomCandles(Number(zoom.dataset.liveCandleZoom), 1);
     });
-    document.addEventListener("dblclick", (event) => { if (event.target.closest("#live-candle-chart svg")) moveCandles(0, 120); });
+    document.addEventListener("dblclick", (event) => {
+      if (!event.target.closest("#live-candle-chart svg")) return;
+      view.candleScale = 1;
+      if (event.target.closest(".live-price-axis")) moveCandles(view.candleOffset); else moveCandles(0, 120);
+    });
     // Without the Fullscreen API (desktop web views), Esc leaves the chart overlay instead of closing the report.
     q("#live-report-dialog").addEventListener("cancel", (event) => { if (view.candleFull && !view.selectedDetail?.chartOnly) { event.preventDefault(); view.candleFull = false; screenFull(false); renderReport(true); } });
     // The report dialog fills the window around the chart; the desktop window or browser then fills the screen.
@@ -1365,13 +1391,13 @@
     const candlePlot = (clientX) => {
       // Pixels per candle and the pointer's position across the plot area (12 units left, 70 right of the viewBox).
       const svg = q("#live-candle-chart svg"), w = svg?.viewBox.baseVal.width || 760, rect = svg?.getBoundingClientRect() || {left:0, width:w};
-      const count = Math.min(Math.round(view.candleZoom), view.candles?.bars.length || 1) || 1;
+      const count = (Math.min(Math.round(view.candleZoom), view.candles?.bars.length || 1) || 1) + candleRoom;
       return {step:rect.width * ((w - 82) / w) / count, at:Math.max(0, Math.min(1, ((clientX - rect.left) * w / rect.width - 12) / (w - 82)))};
     };
     document.addEventListener("pointerdown", (event) => {
       const svg = event.target.closest("#live-candle-chart svg");
       if (event.button !== 0 || !svg) return;
-      view.candleDrag = {x:event.clientX, offset:view.candleOffset, step:candlePlot(event.clientX).step};
+      view.candleDrag = event.target.closest(".live-price-axis") ? {y:event.clientY, scale:view.candleScale} : {x:event.clientX, offset:view.candleOffset, step:candlePlot(event.clientX).step};
       svg.focus({preventScroll:true});
       event.preventDefault();
     });
@@ -1382,7 +1408,11 @@
         view.candleHover = {x:(event.clientX - r.left) * box.width / r.width, y:(event.clientY - r.top) * box.height / r.height};
         drawCandleHover();
       } else if (view.candleHover && !view.candleDrag) { view.candleHover = null; drawCandleHover(); }
-      if (view.candleDrag) moveCandles(view.candleDrag.offset + (event.clientX - view.candleDrag.x) / view.candleDrag.step);
+      if (view.candleDrag?.scale) {
+        // Dragging the price axis down widens the price range (shorter candles); up narrows it (taller candles).
+        view.candleScale = Math.max(.1, Math.min(10, view.candleDrag.scale * Math.exp((event.clientY - view.candleDrag.y) * .006)));
+        moveCandles(view.candleOffset);
+      } else if (view.candleDrag) moveCandles(view.candleDrag.offset + (event.clientX - view.candleDrag.x) / view.candleDrag.step);
     });
     document.addEventListener("pointerup", () => { view.candleDrag = null; });
     // The chart is replaced under the pointer on updates, so leaving it is detected by moves elsewhere or leaving the window.

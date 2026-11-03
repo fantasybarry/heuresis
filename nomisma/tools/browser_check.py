@@ -245,9 +245,28 @@ def check_live(client, app, server_port, output, temporary):
     client.evaluate("""(() => { const svg = document.querySelector('#live-candle-chart svg'), r = svg.getBoundingClientRect(), b = svg.viewBox.baseVal;
       svg.dispatchEvent(new PointerEvent('pointermove', {bubbles:true, clientX:r.left + r.width / 2, clientY:r.top + (b.height - 55) / b.height * r.height})); })()""")
     client.wait("/[0-9,]+ shares/.test(document.querySelector('#live-candle-chart .live-candle-hover').textContent)")
+    assert client.evaluate("!!document.querySelector('#live-candle-chart path[stroke=\"#aa7c35\"]') && document.querySelector('#live-candle-readout').textContent.includes('VWAP')")
+    wick = "(() => { const l = document.querySelector('#live-candle-chart g[clip-path] line'); return l.y2.baseVal.value - l.y1.baseVal.value; })()"
+    before = client.evaluate(wick)
+    client.evaluate("""(() => { const axis = document.querySelector('#live-candle-chart .live-price-axis'), r = axis.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+      axis.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:0, clientX:x, clientY:y}));
+      axis.dispatchEvent(new PointerEvent('pointermove', {bubbles:true, clientX:x, clientY:y - 80}));
+      document.dispatchEvent(new PointerEvent('pointerup', {bubbles:true})); })()""")
+    client.wait(wick + " > " + str(before * 1.5))
+    client.evaluate("document.querySelector('#live-candle-chart .live-price-axis').dispatchEvent(new MouseEvent('dblclick', {bubbles:true}))")
+    client.wait("Math.abs(" + wick + " - " + str(before) + ") < .01")
+    newest = "[...document.querySelectorAll('#live-candle-chart g[clip-path] line')].pop().x1.baseVal.value"
+    right = client.evaluate(newest)
+    client.evaluate("""(() => { const svg = document.querySelector('#live-candle-chart svg'), r = svg.getBoundingClientRect(), y = r.top + r.height / 3;
+      svg.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:0, clientX:r.left + r.width / 2, clientY:y}));
+      svg.dispatchEvent(new PointerEvent('pointermove', {bubbles:true, clientX:r.left + r.width / 4, clientY:y}));
+      document.dispatchEvent(new PointerEvent('pointerup', {bubbles:true})); })()""")
+    client.wait(newest + " < " + str(right - 100) + " && document.querySelector('[data-live-candle-latest]')")
+    client.evaluate("document.querySelector('[data-live-candle-latest]').click()")
+    client.wait("Math.abs(" + newest + " - " + str(right) + ") < .01")
     client.evaluate("document.querySelector('[data-live-candle-full]').click()")
     client.wait("!document.querySelector('#live-report-dialog').open")
-    print("PASS radar stock panel opens full-screen candles with a hovered volume share label")
+    print("PASS radar stock panel opens full-screen candles with session VWAP, price-axis scaling, room ahead of the newest candle, and a hovered volume share label")
 
     client.evaluate("location.hash = 'dashboard'")
     client.wait("document.querySelectorAll('#results-table [data-candles]').length > 0")
@@ -757,14 +776,14 @@ def check_alert_refresh(client, app, output):
 
 
 def synthetic_candles(symbol, timeframe, before=None):
-    """Deterministic OHLCV bars ending now; paging back returns no older bars."""
+    """Deterministic OHLCV bars ending at a fixed 2 p.m. ET (5Min starts at the 4 a.m. pre-market open); paging back returns no older bars."""
     step = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 86400}[timeframe]
-    end = int(time.time()) // step * step
+    end = int(datetime(2026, 10, 30, 18, tzinfo=timezone.utc).timestamp()) - step
     candles = []
     for i in range(0 if before else 120):
         t = datetime.fromtimestamp(end - (119 - i) * step, timezone.utc)
         base = 2 + (i % 17) * .01
-        candles.append({"t": t.isoformat(), "open": base, "high": base + .03, "low": base - .02, "close": base + .01, "volume": 1000 + i * 37})
+        candles.append({"t": t.isoformat(), "open": base, "high": base + .03, "low": base - .02, "close": base + .01, "volume": 1000 + i * 37, "vw": base + .005})
     return {"symbol": symbol, "timeframe": timeframe, "feed": "synthetic", "candles": candles}
 
 

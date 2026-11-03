@@ -217,7 +217,7 @@ class _CashReplay(research_risk._GuardedReplay):
             if minutes:
                 last_end = _ns(minutes[-1]["t"]) + MINUTE
                 snapshot["_extended_day"] = {"volume": sum(bar["volume"] for bar in minutes),
-                    "as_of": _iso(last_end), "received_at": _iso(last_end + timing["bar_delay_seconds"] * NS)}
+                    "as_of": _iso(last_end), "received_at": _iso(last_end + timing["bar_delay_seconds"] * NS), "minutes": minutes}
             assets.append({"symbol": symbol, "minutes": minutes, "bars": stream["daily"], "snapshot": snapshot})
         bundle = {"source": "alpaca", "feed": "sip", "session": session,
                   "assets": assets, "benchmark_bars": session.get("benchmark_bars", [])}

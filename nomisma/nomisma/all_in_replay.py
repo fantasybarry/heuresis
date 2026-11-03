@@ -21,9 +21,9 @@ from .planning_data import capture_planning_quote
 MODEL_ID = "all-in-settled-cash-replay-v1"
 EXIT_RULES = ("fixed_15m", "breakeven_1atr", "trail_1atr")
 PINNED = {
-    "replay.py": "d00fde6fbb4a6e543d5f98e2b585d7f96f39427e282ea18e7758b9b8ab452939",
+    "replay.py": "138c8c0c0e973272a657d7e2ffb54e5ce1f6322e5ca29b2dc164a6d6120819be",
     "research_risk.py": "f39ac4a9361c9862f6d2ad2460b09ae46e85ae6d3f52b0cc4d750d772a65e40b",
-    "cash_replay.py": "a1eecfc14dbe5b7afd2242a6d22a439bc60188bc771d9a4bcd46c885bdad66fe",
+    "cash_replay.py": "2657cfc5b2a32c5eb69fb233c2385fcbf3b3799b66182619a67fc02c0dcf51e8",
     "cash_calendar.py": "86eca799d2ce466153d0e24f09485970b288d5cbcdfbf6962a4fff83971e5055",
     "trade_plan.py": "a71f3361615e2793e2b072a5e9ef1c98ab032b5e2346a63afa1a742dbd943d65",
 }
@@ -270,7 +270,7 @@ class _AllInReplay(cash_replay._CashReplay):
             if minutes:
                 last_end = _ns(minutes[-1]["t"]) + MINUTE
                 snapshot["_extended_day"] = {"volume": sum(bar["volume"] for bar in minutes),
-                    "as_of": _iso(last_end), "received_at": _iso(last_end + timing["bar_delay_seconds"] * NS)}
+                    "as_of": _iso(last_end), "received_at": _iso(last_end + timing["bar_delay_seconds"] * NS), "minutes": minutes}
             assets.append({"symbol": symbol, "minutes": minutes, "bars": stream["daily"], "snapshot": snapshot})
         bundle = {"source": "alpaca", "feed": "sip", "session": session,
                   "assets": assets, "benchmark_bars": session.get("benchmark_bars", [])}

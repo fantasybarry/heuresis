@@ -168,13 +168,15 @@ class SeedTests(unittest.TestCase):
 
     @patch.dict(os.environ, dict(ENV, ALPACA_PAPER="false"), clear=True)
     @patch.object(live, "_now", return_value=NOW.replace(hour=12))
-    def test_premarket_uses_today_session_without_fetching_minutes(self, now):
+    def test_premarket_uses_today_session_and_fetches_only_extended_minutes(self, now):
         get, calls = self.fixture()
         with patch.object(live.providers, "_get_json", side_effect=get):
             bundle = live.load_live_seed(["ABCD"])
         self.assertEqual(bundle["session"]["date"], "2025-07-03")
         self.assertEqual(bundle["assets"][0]["minutes"], [])
-        self.assertFalse(any(params.get("timeframe") == "1Min" for url, params, headers in calls))
+        minute_starts = [params["start"] for url, params, headers in calls if params.get("timeframe") == "1Min"]
+        self.assertTrue(minute_starts)
+        self.assertTrue(all(start.startswith("2025-07-03T08:00:00") for start in minute_starts))
         self.assertTrue(calls[0][0].startswith("https://api.alpaca.markets/"))
 
     @patch.dict(os.environ, ENV, clear=True)
@@ -219,7 +221,7 @@ class SeedTests(unittest.TestCase):
             self.assertIsNone(result["day_volume"])
             self.assertFalse(result["day_volume_fresh"])
             self.assertFalse(result["alert_eligible"])
-            self.assertIn("Extended-hours minute volume could not be loaded", " ".join(bundle["warnings"]))
+            self.assertIn("Extended-hours minutes could not be loaded", " ".join(bundle["warnings"]))
             self.assertNotIn("private-provider-key", json.dumps(bundle))
             with patch.object(live, "extended_day_volumes", side_effect=live._Cancelled("Stopped")):
                 with self.assertRaises(live._Cancelled):
@@ -227,12 +229,11 @@ class SeedTests(unittest.TestCase):
 
     @patch.dict(os.environ, ENV, clear=True)
     @patch.object(live, "_now", return_value=NOW)
-    def test_current_provider_daily_volume_does_not_load_or_add_extended_fallback(self, now):
+    def test_current_provider_daily_volume_still_loads_extended_minutes_for_vwap(self, now):
         get, _ = self.fixture()
-        with patch.object(live.providers, "_get_json", side_effect=get), \
-                patch.object(live, "extended_day_volumes", side_effect=AssertionError("Already have provider total")):
+        with patch.object(live.providers, "_get_json", side_effect=get):
             bundle = live.load_live_seed(["ABCD"])
-        self.assertNotIn("_extended_day", bundle["assets"][0]["snapshot"])
+        self.assertIsInstance(bundle["assets"][0]["snapshot"]["_extended_day"]["minutes"], list)
         self.assertEqual(bundle["assets"][0]["snapshot"]["dailyBar"]["v"], 120000)
 
     def test_weekend_calendar_selects_most_recent_session(self):
@@ -754,13 +755,14 @@ class StreamTests(unittest.TestCase):
 class CandleTests(unittest.TestCase):
     def test_pages_newest_first_and_returns_oldest_first(self):
         def bar(minute):
-            return {"t": "2025-07-03T15:%02d:00Z" % minute, "o": 2, "h": 3, "l": 1, "c": 2.5, "v": 100}
+            return {"t": "2025-07-03T15:%02d:00Z" % minute, "o": 2, "h": 3, "l": 1, "c": 2.5, "v": 100, "vw": 2.25}
         pages = [{"bars": {"AAPL": [bar(3), bar(2)]}, "next_page_token": "next"},
                  {"bars": {"AAPL": [bar(1)]}, "next_page_token": None}]
         with patch.dict(os.environ, ENV), patch.object(live, "_get_json", side_effect=pages) as get:
             result = live.fetch_candles("aapl", "5Min")
         self.assertEqual([candle["t"] for candle in result["candles"]],
                          ["2025-07-03T15:0%d:00+00:00" % minute for minute in (1, 2, 3)])
+        self.assertEqual({candle["vw"] for candle in result["candles"]}, {2.25})
         self.assertEqual(get.call_args_list[0].args[1]["sort"], "desc")
         self.assertEqual(get.call_args_list[1].args[1]["page_token"], "next")
 

@@ -7,7 +7,7 @@ the preceding twenty minutes. These are different measures, not forecasts.
 
 import math
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as daytime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .engine import _ema, _number, _rsi
@@ -217,15 +217,24 @@ must never make a fresh trade or quote change the completed-bar setup score.
             for previous, current in zip(minutes[-21:-1], minutes[-20:]))
         minute_baseline = math.fsum(bar["volume"] for bar in minutes[-21:-1]) / 20 if len(minutes) >= 21 else None
         minute_rvol = last["volume"] / minute_baseline if contiguous and minute_baseline else None
-        vwap_complete = complete_coverage and all(bar["vwap"] is not None for bar in minutes if bar["volume"] > 0)
-        vwap = math.fsum(bar["vwap"] * bar["volume"] for bar in minutes if bar["volume"] > 0) / session_volume if session_volume and vwap_complete else None
+        snapshot = asset.get("snapshot") if isinstance(asset.get("snapshot"), dict) else {}
+        # VWAP starts at the 4 a.m. pre-market open, so completed pre-market minutes count before the regular ones.
+        # Without loaded pre-market minutes (an empty list means no trades) VWAP stays unavailable.
+        extended = snapshot.get("_extended_day") if isinstance(snapshot.get("_extended_day"), dict) else {}
+        premarket, invalid_premarket = (_minutes(extended["minutes"], datetime.combine(session_date, daytime(4), _NY), session_open, now)
+                                        if isinstance(extended.get("minutes"), list) and session_date else ([], True))
+        premarket_ok = not invalid_premarket and all(bar["vwap"] is not None for bar in premarket if bar["volume"] > 0)
+        premarket_volume = math.fsum(bar["volume"] for bar in premarket)
+        premarket_value = math.fsum(bar["vwap"] * bar["volume"] for bar in premarket if bar["volume"] > 0) if premarket_ok else 0
+        vwap_complete = premarket_ok and complete_coverage and all(bar["vwap"] is not None for bar in minutes if bar["volume"] > 0)
+        vwap_volume = session_volume + premarket_volume if session_volume is not None else None
+        vwap = (premarket_value + math.fsum(bar["vwap"] * bar["volume"] for bar in minutes if bar["volume"] > 0)) / vwap_volume if vwap_volume and vwap_complete else None
         closes = [bar["close"] for bar in minutes]
         ema9_series = _ema(closes, 9) if len(closes) >= 9 else []
         ema9 = ema9_series[-1] if ema9_series else None
         ema20_series = _ema(closes, 20) if len(closes) >= 20 else []
         ema20 = ema20_series[-1] if ema20_series else None
         rsi = _rsi(closes) if len(closes) >= 15 else None
-        snapshot = asset.get("snapshot") if isinstance(asset.get("snapshot"), dict) else {}
         raw_status = snapshot.get("tradingStatus") or {}
         status_at = _time(raw_status.get("t")) if isinstance(raw_status, dict) else None
         status_code = str(raw_status.get("sc", "")) if isinstance(raw_status, dict) else ""
@@ -352,7 +361,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
         if technical_close is None or not config["min_price"] <= technical_close <= config["max_price"]:
             blockers.append("Completed minute close is outside the configured price range or unavailable.")
         if vwap is None:
-            blockers.append("Session VWAP requires actual VWAP values for every positive-volume minute.")
+            blockers.append("Session VWAP requires actual VWAP values for every positive-volume minute since the 4 a.m. pre-market open.")
         above_vwap = vwap is not None and technical_close is not None and technical_close > vwap
         ema_trend = ema9 is not None and ema20 is not None and ema9 > ema20
         rising = len(ema9_series) >= 2 and ema9_series[-2] is not None and ema9 > ema9_series[-2]
@@ -361,7 +370,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
         breakout = len(minutes) >= 6 and technical_close > max(bar["high"] for bar in minutes[-6:-1])
         positive = technical_change is not None and technical_change > 0
         conditions = [
-            ("Above session VWAP", above_vwap, 20, "Completed minute close is above regular-session VWAP."),
+            ("Above session VWAP", above_vwap, 20, "Completed minute close is above session VWAP, which includes pre-market trading from 4 a.m."),
             ("EMA trend", ema_trend, 20, "Nine-minute EMA is above the twenty-minute EMA."),
             ("Rising EMA", rising, 10, "Nine-minute EMA rose from the preceding completed minute."),
             ("RSI momentum", rsi_ok, 15, "Fourteen-minute Wilder RSI is between 50 and 75 inclusive."),
@@ -387,8 +396,8 @@ must never make a fresh trade or quote change the completed-bar setup score.
         ]
         # The same complete-bar calculations power the chart and score. VWAP
         # becomes unavailable at a missing minute or missing positive VWAP.
-        chart, cumulative_volume, cumulative_value = [], 0, 0
-        chart_coverage = has_opening and not invalid_minutes
+        chart, cumulative_volume, cumulative_value = [], premarket_volume, premarket_value
+        chart_coverage = has_opening and not invalid_minutes and premarket_ok
         for index, bar in enumerate(minutes):
             if bar["volume"] > 0:
                 chart_coverage = chart_coverage and bar["vwap"] is not None
@@ -493,7 +502,7 @@ def demo_bundle(symbols, step=0):
                                                  "h": max(bar["high"] for bar in minutes),
                                                  "l": min(bar["low"] for bar in minutes),
                                                  "c": latest["close"], "v": sum(bar["volume"] for bar in minutes)},
-                                    "_daily_received_at": _iso(now),
+                                    "_daily_received_at": _iso(now), "_extended_day": {"minutes": []},
                                     "prevDailyBar": {"c": prior_close}},
                        "float": {"shares": 8500000 + asset_index * 1000000, "as_of": "2025-05-13", "source": "Synthetic"}})
     benchmark_bars = []

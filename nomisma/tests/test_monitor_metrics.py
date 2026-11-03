@@ -332,6 +332,22 @@ class PriceAndFloatTests(unittest.TestCase):
         result = row(bundle, now, min_session_volume=0)
         self.assertAlmostEqual(result["vwap"], 5100 / 4900)
 
+    def test_session_vwap_includes_premarket_minutes_and_can_block_the_setup(self):
+        bundle, now = fixture()
+        assert row(bundle, now)["alert_eligible"]
+        snapshot, minutes = bundle["assets"][0]["snapshot"], bundle["assets"][0]["minutes"]
+        opening = datetime.fromisoformat(bundle["session"]["open"])
+        heavy = dict(minutes[0], t=(opening - timedelta(minutes=30)).isoformat(), volume=10000000, vwap=minutes[-1]["close"] * 2)
+        snapshot["_extended_day"] = {"minutes": [heavy, dict(minutes[0], t=opening.isoformat())]}  # regular minutes are ignored here
+        result = row(bundle, now)
+        regular = sum(bar["vwap"] * bar["volume"] for bar in minutes)
+        self.assertAlmostEqual(result["vwap"], (heavy["vwap"] * heavy["volume"] + regular) / (heavy["volume"] + result["session_volume"]))
+        self.assertFalse(result["alert_eligible"])
+        self.assertIn("above session VWAP", " ".join(result["blockers"]))
+        self.assertAlmostEqual(result["chart"][-1]["vwap"], result["vwap"])
+        del snapshot["_extended_day"]
+        self.assertIsNone(row(bundle, now)["vwap"])
+
     def test_missing_vwap_is_not_replaced_by_typical_price(self):
         bundle, now = fixture()
         del bundle["assets"][0]["minutes"][0]["vwap"]

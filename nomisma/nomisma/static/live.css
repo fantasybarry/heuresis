@@ -132,6 +132,7 @@
 .live-tf-segment { padding:2px; gap:2px; border:1px solid #dfe7d8; border-radius:8px; background:#f4f7f0; }
 .live-tf-segment .button { border-color:transparent; background:transparent; }
 .live-candle-chart svg:active { cursor:grabbing; }
+.live-candle-chart .live-price-axis, .live-candle-chart svg:active .live-price-axis { cursor:ns-resize; }
 .live-candle-nav { display:flex; justify-content:space-between; align-items:center; min-height:24px; font-size:11px; color:#88967a; }
 /* Full-screen chart: the report dialog fills the window and shows only the candle section. */
 #live-report-dialog.candle-full { width:100vw; height:100vh; max-width:none; max-height:none; margin:0; border:0; border-radius:0; overflow:hidden; }

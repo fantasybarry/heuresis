@@ -18,7 +18,7 @@ from . import calibration_data, replay
 
 ADAPTER_VERSION = "calibration-stream-v1"
 COMPARISON_VERSION = "calibration-development-v1"
-PINNED_REPLAY_SHA256 = "d00fde6fbb4a6e543d5f98e2b585d7f96f39427e282ea18e7758b9b8ab452939"
+PINNED_REPLAY_SHA256 = "138c8c0c0e973272a657d7e2ffb54e5ce1f6322e5ca29b2dc164a6d6120819be"
 GRID = {"stop_atr_multiple": (1, 1.5, 2), "reward_multiple": (2, 2.5, 3),
         "hold_minutes": (5, 15, 30)}
 _ZERO = Decimal(0)
