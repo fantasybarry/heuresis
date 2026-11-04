@@ -156,9 +156,9 @@
     "semantic_hash": ""
   },
   "nomisma/nomisma/research.py": {
-    "mtime": 1793246816.7007601,
-    "seen": 1793246937.945753,
-    "ast_hash": "bda3cd34c25fa46bc0de9ed446bd6c0f",
+    "mtime": 1793797740.0245748,
+    "seen": 1793797972.909306,
+    "ast_hash": "371d32c1f751e09f2643136501148e71",
     "semantic_hash": ""
   },
   "nomisma/nomisma/research_data.py": {
@@ -198,9 +198,9 @@
     "semantic_hash": ""
   },
   "nomisma/nomisma/static/live.js": {
-    "mtime": 1793635513.9140258,
-    "seen": 1793635637.609814,
-    "ast_hash": "f650e580fb0c9d5f167f00aedceca67c",
+    "mtime": 1793797882.094358,
+    "seen": 1793797972.909324,
+    "ast_hash": "d936e02450011cca3fa328f838d8e459",
     "semantic_hash": ""
   },
   "nomisma/nomisma/static/planner.js": {
@@ -354,9 +354,9 @@
     "semantic_hash": "3064a3685f520e9b34c22f362e1d6eac"
   },
   "nomisma/tests/test_research.py": {
-    "mtime": 1793246859.1630604,
-    "seen": 1793246937.9457831,
-    "ast_hash": "450c69472609a95b5bd74d6747251c0c",
+    "mtime": 1793797776.2680364,
+    "seen": 1793797972.909397,
+    "ast_hash": "77021ef5ec8cfc85e4b0b46d497065d5",
     "semantic_hash": ""
   },
   "nomisma/tests/test_research_data.py": {
@@ -432,9 +432,9 @@
     "semantic_hash": ""
   },
   "nomisma/tools/browser_check.py": {
-    "mtime": 1793634732.878978,
-    "seen": 1793634866.638964,
-    "ast_hash": "bad2ea518262ca70be86c476c256fd19",
+    "mtime": 1793797812.6778765,
+    "seen": 1793797972.90943,
+    "ast_hash": "0944346f6e70447ced298d03253cb3e3",
     "semantic_hash": ""
   },
   "nomisma/tools/build_desktop.py": {
@@ -510,8 +510,8 @@
     "semantic_hash": "fb762747460d47091f1623a46e9ac0b4"
   },
   "nomisma/AGENTS.md": {
-    "mtime": 1789501136.5518963,
-    "seen": 1790011170.389744,
+    "mtime": 1793748326.6356795,
+    "seen": 1793797972.9094799,
     "ast_hash": "30be791508cf7c6cd3623936096ee6f0",
     "semantic_hash": "30be791508cf7c6cd3623936096ee6f0"
   },
@@ -534,9 +534,9 @@
     "semantic_hash": ""
   },
   "nomisma/README.md": {
-    "mtime": 1793635513.914508,
-    "seen": 1793635637.6098702,
-    "ast_hash": "078d354725923ee773d50ea80d727fee",
+    "mtime": 1793797947.9135187,
+    "seen": 1793797972.9094899,
+    "ast_hash": "34d340f29909eb17a0587f1d43da8ee4",
     "semantic_hash": ""
   },
   "nomisma/desktop/README.md": {
@@ -582,21 +582,21 @@
     "semantic_hash": ""
   },
   ".sdl-mcp/sdl-observability-lifetime.backup.json": {
-    "mtime": 1793635606.5794046,
-    "seen": 1793635637.60977,
-    "ast_hash": "22dd89f9dcc1025d982dc26fd326cd69",
+    "mtime": 1793797923.3998117,
+    "seen": 1793797972.909191,
+    "ast_hash": "42f036ab4d5ccbb42f4331ded63e7c63",
     "semantic_hash": ""
   },
   ".sdl-mcp/sdl-observability-lifetime.json": {
-    "mtime": 1793635636.5781276,
-    "seen": 1793635637.609778,
-    "ast_hash": "f7adec855eaeea398cfa5276ba2eb3b4",
+    "mtime": 1793797953.4935043,
+    "seen": 1793797972.9092128,
+    "ast_hash": "02085040603c370d2d9eca7319d12154",
     "semantic_hash": ""
   },
   ".sdl-mcp/sdl-observability-lifetime.lock.json": {
-    "mtime": 1793635636.6786005,
-    "seen": 1793635637.609778,
-    "ast_hash": "5f653115143a628a092fecf6f052b73c",
+    "mtime": 1793797955.8254635,
+    "seen": 1793797972.909216,
+    "ast_hash": "59a5494bc04924af92671c3c9f2a0ec8",
     "semantic_hash": ""
   },
   ".sdl-mcp/sdlmcp.config.json": {
@@ -863,46 +863,52 @@
     "ast_hash": "5d1e236d1ad55816c505a46415129fb7",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzg80nv.22e1841754da8bcd902df154f70c8a05.json": {
-    "mtime": 1793635369.5981214,
-    "seen": 1793635637.609771,
-    "ast_hash": "f5835582f6831934f6f9111c4ee27f11",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24v0zz.5c84b76c3be6fa1ecdff37f5e8241fd4.json": {
+    "mtime": 1793797682.6461747,
+    "seen": 1793797972.909194,
+    "ast_hash": "f6a7ccc6a5c900a2e109c5244c476fa4",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzg8ny4.253f72eeeccc0d32ac150a59ed6a1932.json": {
-    "mtime": 1793635396.591519,
-    "seen": 1793635637.609772,
-    "ast_hash": "4f71f94e1b52c4f2b63b0b0e4719c804",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24vnbr.672d206cd2c90447eb481aa0873f5460.json": {
+    "mtime": 1793797713.075617,
+    "seen": 1793797972.909197,
+    "ast_hash": "7b7fdd7a93af2b6f14b7d31698cc8a06",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzg9cay.75c8ec825c84f6a690fa872f0d47a1ab.json": {
-    "mtime": 1793635426.5710151,
-    "seen": 1793635637.6097732,
-    "ast_hash": "bb15193d868aeacac15ae5576a325224",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24war3.a71280b5350b947373bfa202d30d8bee.json": {
+    "mtime": 1793797742.6968327,
+    "seen": 1793797972.909199,
+    "ast_hash": "eb57aae6d2c6e8e8d999177a3c753100",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzg9y34.e68f94194005d31bba5954967ef8357d.json": {
-    "mtime": 1793635456.788689,
-    "seen": 1793635637.609774,
-    "ast_hash": "8eab67a1a48b2041ef4634fb40be50cf",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24wyy9.38b8541e6470d0751d4b5d971be82949.json": {
+    "mtime": 1793797771.898802,
+    "seen": 1793797972.9092019,
+    "ast_hash": "2ab29c107e5d724acd72f328dfc1750e",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzgalb8.e6acb4aab4f7678382632335c376f3f2.json": {
-    "mtime": 1793635488.2911603,
-    "seen": 1793635637.609775,
-    "ast_hash": "82e9ac091c7638d446e67ae134346aa0",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24xln3.fd3e4b1759d516563e54dda516efa759.json": {
+    "mtime": 1793797802.4554873,
+    "seen": 1793797972.909204,
+    "ast_hash": "520524c243d8e6d590aec42972cf6a65",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzgb8e3.7a55f7e392acf825dc05a9b90f7573a1.json": {
-    "mtime": 1793635516.5281363,
-    "seen": 1793635637.609776,
-    "ast_hash": "33cceff9f02a29629e0c52cb8367c077",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24y8fo.5aaf1b56ce0157bf89ef49da6162d292.json": {
+    "mtime": 1793797832.6428332,
+    "seen": 1793797972.909206,
+    "ast_hash": "ca8c2cc36bdaf88d4ce480900d7412d0",
     "semantic_hash": ""
   },
-  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mvzgbvlk.f1f1fc6d8a40658363dcd0ab516bbfaa.json": {
-    "mtime": 1793635546.5560176,
-    "seen": 1793635637.609777,
-    "ast_hash": "5a57c7ca05605aabcdf043100bab7d88",
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24yw4e.7996e9a642ea6d7cf19110a32504549b.json": {
+    "mtime": 1793797863.2461982,
+    "seen": 1793797972.909208,
+    "ast_hash": "0a91d0b814db37cf8e5c1cf95b458429",
+    "semantic_hash": ""
+  },
+  ".sdl-mcp/sdl-observability-lifetime.evidence.v1.validated-supported.publication.000mw24zk86.153d67077d60dfabc7cb652141791fb7.json": {
+    "mtime": 1793797892.3146195,
+    "seen": 1793797972.9092102,
+    "ast_hash": "d9c4b0ac4ae621bca844b87b0a0fdc91",
     "semantic_hash": ""
   }
 }
