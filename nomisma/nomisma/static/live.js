@@ -533,7 +533,7 @@
     const filtered = rows.filter((row) => !view.query || `${row.symbol} ${row.name}`.toLowerCase().includes(view.query));
     filtered.sort(compareRows(view.sort));
     if (!rows.length) {
-      replaceMarkup("#live-table", `<div class="live-empty"><span aria-hidden="true">⌁</span><h3>${status.running ? "Building your session view" : "Your next session starts here"}</h3><p>${status.running ? "Loading current quotes, minute bars, and prior history for liquidity and volatility. Connection status above shows progress." : `Ready to monitor ${escapeHTML(config.symbols.join(", "))}. Start the monitor to follow prices and evaluate minute-by-minute setups.`}</p></div>`);
+      replaceMarkup("#live-table", `<div class="live-empty"><span aria-hidden="true">⌁</span><h3>${status.running ? "Building your session view" : "Your next session starts here"}</h3><p>${status.running ? "Loading current quotes, minute bars, and prior history for liquidity and volatility. Connection status above shows progress." : config.symbols.length ? `Ready to monitor ${escapeHTML(config.symbols.join(", "))}. Start the monitor to follow prices and evaluate minute-by-minute setups.` : "No stock meets your search rules right now. The radar refills when a search finds stocks."}</p></div>`);
       return;
     }
     if (!filtered.length) { replaceMarkup("#live-table", '<div class="live-empty"><h3>No matching symbols</h3><p>Try another symbol or company name.</p></div>'); return; }

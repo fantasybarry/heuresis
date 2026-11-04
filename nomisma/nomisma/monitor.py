@@ -98,6 +98,8 @@ class LiveMonitor:
             if self.status["running"]:
                 raise MonitorBusy("Monitoring is already running. Stop it before starting another session.")
             config = validate_monitor_config(payload or {}, self.config)
+            if not config["symbols"]:
+                raise ValueError("The radar is empty: no stock meets today's search yet. Add symbols, or start again after a search finds stocks.")
             if config["source"] == "alpaca" and not live_provider_status()["alpaca_configured"]:
                 raise ValueError("Alpaca is not configured. Save ALPACA_API_KEY and ALPACA_SECRET_KEY in the project .env, then restart Nomisma.")
             self.store.set("monitor_config", config)

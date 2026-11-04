@@ -115,7 +115,7 @@ class Application:
         self.lock = threading.Lock()
         self.mutation_lock = threading.RLock()
         self.research_jobs = {}
-        self.radar_date, self.radar_paused = None, False
+        self.radar_paused = False
         self.stop_event = threading.Event()
         self.job = {"running": False, "message": "Ready to scan", "error": None, "scan_id": None}
         if self.store.get("settings") is None:
@@ -356,18 +356,20 @@ class Application:
                 job.update(completed)
 
     def _update_radar(self, result):
-        """Replace the radar's symbols with the search's top results; an active monitor restarts on them."""
+        """Replace the radar's symbols with the search's top results (none empties it); an active monitor restarts on them."""
         symbols = [row["symbol"] for row in result.get("rows", [])][:MAX_MONITOR_SYMBOLS]
-        day = result.get("session_date")
         if not symbols:
-            # An empty search keeps today's radar, not an earlier session's: pause until a search finds today's stocks.
-            if day != self.radar_date and self.monitor.status["running"]:
+            # An empty search empties the radar; a running monitor pauses until a search finds stocks.
+            if self.monitor.status["running"]:
                 self.monitor.stop()
-                with self.monitor.lock:
-                    self.monitor.status["message"] = "Paused: no stock meets today's search yet. Monitoring resumes after the next search finds stocks."
                 self.radar_paused = True
+            try:
+                self.monitor.save_config({"source": result.get("source", self.monitor.config["source"]), "symbols": []})
+                with self.monitor.lock:
+                    self.monitor.status["message"] = "Paused: no stock meets the search rules right now. The radar refills after a search finds stocks."
+            except Exception as exc:
+                LOGGER.warning("Could not empty the radar after discovery (%s)", type(exc).__name__)
             return
-        self.radar_date = day
         resume, self.radar_paused = self.radar_paused, False
         config = self.monitor.config
         if not resume and result.get("source") == config["source"] and set(symbols) == set(config["symbols"]):

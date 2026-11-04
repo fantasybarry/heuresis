@@ -280,7 +280,7 @@ class DiscoveryScheduleTests(unittest.TestCase):
             self.app.scheduler_tick(self.now)
             self.assertEqual(len(self.app.research_jobs), 1)
             monitor_start.assert_not_called()
-            save_config.assert_not_called()
+            save_config.assert_called_once_with({"source": "demo", "symbols": []})  # the empty search empties the radar
         self.assertIsNone(self.app.store.get("schedule_last_success"))
         self.assertEqual(self.app.discovery_snapshot(self.now)["status"]["last_success_date"], "2026-09-08")
         another = Application(self.temp.name, seed=False)
@@ -349,24 +349,23 @@ class DiscoveryScheduleTests(unittest.TestCase):
         self.app.monitor.status["running"] = True
         with patch.object(self.app.monitor, "stop") as stop, patch.object(self.app.monitor, "start") as start:
             self.app._update_radar({"source": "demo", "rows": [{"symbol": "CCC"}]})
-            self.app._update_radar({"source": "demo", "rows": []})
         stop.assert_called_once()
         start.assert_called_once_with({"source": "demo", "symbols": ["CCC"]})
 
-    def test_empty_search_on_a_new_day_pauses_the_radar_until_stocks_qualify(self):
+    def test_empty_search_empties_the_radar_and_resumes_when_stocks_qualify(self):
+        self.app.monitor.save_config({"source": "demo", "symbols": ["AAA", "BBB"]})
         self.app.monitor.status["running"] = True
-        self.app.radar_date = "2026-09-07"
-        with patch.object(self.app.monitor, "stop") as stop, patch.object(self.app.monitor, "start") as start:
-            self.app._update_radar({"source": "demo", "session_date": "2026-09-08", "rows": []})
-            stop.assert_called_once()
+        stop = lambda: self.app.monitor.status.update(running=False)
+        with patch.object(self.app.monitor, "stop", side_effect=stop), patch.object(self.app.monitor, "start") as start:
+            self.app._update_radar({"source": "demo", "rows": []})
+            self.assertEqual(self.app.monitor.config["symbols"], [])
             self.assertTrue(self.app.radar_paused)
-            self.app.monitor.status["running"] = False
-            self.app._update_radar({"source": "demo", "session_date": "2026-09-08", "rows": [{"symbol": "DDD"}]})
+            self.assertIn("Paused", self.app.monitor.status["message"])
+            self.app._update_radar({"source": "demo", "rows": [{"symbol": "DDD"}]})
             start.assert_called_once_with({"source": "demo", "symbols": ["DDD"]})
-            self.app.monitor.status["running"] = True
-            self.app._update_radar({"source": "demo", "session_date": "2026-09-08", "rows": []})
-        self.assertEqual(stop.call_count, 2)  # one more from the resume; today's radar survives the empty search
         self.assertFalse(self.app.radar_paused)
+        with self.assertRaisesRegex(ValueError, "radar is empty"):
+            self.app.monitor.start({"symbols": []})
 
     def test_manual_discovery_persists_config_but_does_not_consume_schedule(self):
         self.enable()
