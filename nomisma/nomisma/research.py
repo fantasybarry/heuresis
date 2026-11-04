@@ -95,7 +95,7 @@ def _universe(config, headers, account_url, progress, stop_event):
     if config["universe"] == "curated":
         requested = [symbol for symbol in providers.CURATED_SYMBOLS if symbol in allowed]
         return requested, {symbol: providers._asset_metadata(symbol) for symbol in requested}, "Maintained starter universe", []
-    _report(progress, "Loading active tradable US listings…", stop_event)
+    _report(progress, "Loading active US listings…", stop_event)
     listing = live._get_json(account_url + "/v2/assets", {"status": "active", "asset_class": "us_equity"}, headers, stop_event)
     if not isinstance(listing, list):
         raise ValueError("Alpaca returned an invalid listing response.")
@@ -104,7 +104,8 @@ def _universe(config, headers, account_url, progress, stop_event):
     for item in listing:
         if not isinstance(item, dict):
             raise ValueError("Alpaca returned an invalid listing record.")
-        if (item.get("status") != "active" or item.get("tradable") is not True
+        # Listings Alpaca won't take orders for stay in, flagged, since their market data is still live.
+        if (item.get("status") != "active"
                 or item.get("class", "us_equity") != "us_equity"
                 or item.get("exchange") not in ("NASDAQ", "NYSE", "AMEX", "ARCA", "NYSEARCA", "BATS")):
             continue
@@ -115,13 +116,14 @@ def _universe(config, headers, account_url, progress, stop_event):
             continue
         if symbol not in allowed:
             continue
-        metadata[symbol] = {"symbol": symbol, "name": str(item.get("name") or symbol)[:160]}
+        metadata[symbol] = {"symbol": symbol, "name": str(item.get("name") or symbol)[:160],
+                            "tradable": item.get("tradable") is True}
     if not metadata or len(metadata) > 20000:
         raise ValueError("Listing universe is empty or exceeds 20,000 symbols; select a smaller universe.")
-    warnings = ["All listings means active tradable NASDAQ, NYSE, AMEX, ARCA/NYSEARCA and BATS US equities offered by Alpaca; Only verified company common/ordinary stocks and depositary shares are eligible; funds and other products are excluded. It is not every US security."]
+    warnings = ["All listings means active NASDAQ, NYSE, AMEX, ARCA/NYSEARCA and BATS US equities listed by Alpaca, including ones Alpaca does not accept orders for (marked Not tradable); Only verified company common/ordinary stocks and depositary shares are eligible; funds and other products are excluded. It is not every US security."]
     if unsupported:
         warnings.append("Skipped {} unsupported ticker formats.".format(unsupported))
-    return sorted(metadata), metadata, "Alpaca active tradable US listings", warnings
+    return sorted(metadata), metadata, "Alpaca active US listings", warnings
 
 
 def _stamp_or_none(raw):
@@ -387,6 +389,8 @@ def discover(payload, progress=None, stop_event=None):
             coverage["missing"] += 1
             continue
         row, reason = _candidate(symbol, snapshots[symbol], metadata[symbol]["name"], now, session)
+        if row is not None:
+            row["tradable"] = metadata[symbol].get("tradable")
         if reason:
             coverage[reason] += 1
             continue

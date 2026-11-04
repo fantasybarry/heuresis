@@ -380,6 +380,7 @@ def check_metric_null_sorting(client, app):
                 row.update(volume_partial=True, day_volume_partial=False,
                            volume_basis='completed_extended_minutes', volume_at='2026-09-11T15:37:00Z',
                            volume_received_at='2026-09-11T15:45:00Z')
+            next(row for row in candidate_rows if row['symbol'] == 'SORTC')['tradable'] = False
             candidates.update(job=None, latest={'id':'volume-annotation-fixture', 'running':False,
                 'result':{'source':'demo', 'feed':'synthetic', 'rows':candidate_rows, 'coverage':{}, 'warnings':[]}})
             with patch.object(app, 'discovery_snapshot', return_value=candidates):
@@ -389,11 +390,13 @@ def check_metric_null_sorting(client, app):
                 title = client.evaluate("document.querySelector('[data-live-candidate=SORTC]').closest('tr').querySelector('[data-metric=day_volume]').title")
                 assert 'Completed minutes through 11:37:00' in title and '11:45:00' not in title, title
                 assert 'partial total may undercount' in title
+                assert client.evaluate("Array.from(document.querySelectorAll('[data-live-candidate]'), box => box.dataset.liveCandidate + ':' + !!box.closest('tr').querySelector('.live-untradable')).join()") == "SORTC:true,SORTA:false,SORTD:false,SORTB:false"
                 client.evaluate("document.querySelector('#live-discovery-dialog').close()")
+                client.wait("!!document.querySelector('[data-live-symbol=SORTC] .live-untradable') && document.querySelectorAll('#live-table .live-untradable').length === 1")
     finally:
         client.call("Page.reload")
         client.wait("document.querySelectorAll('#live-table [data-live-symbol]').length === %d" % len(snapshot["rows"]))
-    print("PASS candidate/radar metric visibility, numeric ranking, selection persistence, and decimal/zero/null sorting")
+    print("PASS candidate/radar metric visibility, numeric ranking, selection persistence, decimal/zero/null sorting, and Not tradable badges")
     print("PASS radar/candidate stale and partial volume labels, missing/zero display, and actual fallback-minute provenance")
 
 

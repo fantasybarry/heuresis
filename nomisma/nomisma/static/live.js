@@ -177,7 +177,7 @@
     const rows = [...(view.discovery?.rows || [])].sort(compareRows(view.candidateSort));
     const wrapper = q("#live-candidate-table-wrapper");
     if (!wrapper) return;
-    wrapper.innerHTML = `<table class="live-history-table live-candidate-table"><thead><tr><th>Select / symbol</th><th class="live-num">Price / day</th>${screeningHeaders()}<th>Data freshness</th></tr></thead><tbody>${rows.map((row) => `<tr><td><label class="live-candidate-choice"><input type="checkbox" data-live-candidate="${escapeHTML(row.symbol)}" aria-label="Select ${escapeHTML(row.symbol)}" ${view.candidates.has(row.symbol) ? "checked" : ""}><span><strong>${escapeHTML(row.symbol)}</strong><small>${escapeHTML(row.name || "")}</small></span></label></td><td class="live-num">${dollars(row.price)}<small class="${direction(row.change_pct)}">${pct(row.change_pct)}</small></td>${screeningCells(row)}<td>${escapeHTML(row.freshness || "Unavailable")}<small>${clock(row.trade_at)}</small>${row.volume_basis ? `<small>${escapeHTML(row.volume_basis.replaceAll("_", " "))}</small>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    wrapper.innerHTML = `<table class="live-history-table live-candidate-table"><thead><tr><th>Select / symbol</th><th class="live-num">Price / day</th>${screeningHeaders()}<th>Data freshness</th></tr></thead><tbody>${rows.map((row) => `<tr><td><label class="live-candidate-choice"><input type="checkbox" data-live-candidate="${escapeHTML(row.symbol)}" aria-label="Select ${escapeHTML(row.symbol)}" ${view.candidates.has(row.symbol) ? "checked" : ""}><span><strong>${escapeHTML(row.symbol)}</strong><small>${escapeHTML(row.name || "")}</small></span>${notTradable(row.symbol)}</label></td><td class="live-num">${dollars(row.price)}<small class="${direction(row.change_pct)}">${pct(row.change_pct)}</small></td>${screeningCells(row)}<td>${escapeHTML(row.freshness || "Unavailable")}<small>${clock(row.trade_at)}</small>${row.volume_basis ? `<small>${escapeHTML(row.volume_basis.replaceAll("_", " "))}</small>` : ""}</td></tr>`).join("")}</tbody></table>`;
     candidateSelection();
   }
   function rankingDetails(ranking) {
@@ -222,6 +222,7 @@
       view.discovery = job.result;
       view.candidates.clear();
       renderDiscovery(job.result);
+      if (view.snapshot) render();  // radar badges read the new search's tradable flags
     }
     candidateSelection();
   }
@@ -500,6 +501,9 @@
     const dots = `<span class="live-dots" aria-hidden="true">${Array.from({length:required}, (_, i) => `<i class="${i < bars ? "on" : ""}"></i>`).join("")}</span>`;
     return `<strong class="${blocker ? "live-blocked-label" : "positive"}">${escapeHTML(blocker || (confirmation.confirmed ? "Confirmed setup" : row.alert_eligible ? "Conditions pass" : "Not eligible"))}</strong><small>${dots}${escapeHTML(progress + cooldown)}</small>`;
   }
+  // Alpaca's tradable flag comes from the latest candidate search; data stays live, only Alpaca orders are refused.
+  const notTradable = (symbol) => view.discovery?.rows?.some((row) => row.symbol === symbol && row.tradable === false)
+    ? '<span class="live-badge live-untradable" title="Alpaca does not accept orders for this stock. Its market data is still live; another broker may allow trading.">Not tradable</span>' : "";
   const badge = (level) => `<span class="live-badge ${levelClass(level)}">${level === "Strong buy" || level === "Buy" ? level : "No setup"}</span>`;
   const pct1 = (value) => numeric(value) ? `${value > 0 ? "+" : value < 0 ? "−" : ""}${n(Math.abs(value), 1)}%` : "—";
   const ratio1 = (value) => numeric(value) ? `${n(value, 1)}×` : "—";
@@ -510,14 +514,14 @@
     const minuteCell = metricCell(row.minute_relative_volume, ratio(row.minute_relative_volume), "1-minute RVOL", volumeClass);
     const selected = row.symbol === view.focus ? " live-selected" : "";
     if (!view.extraColumns) return `<tr class="${row.stale ? "live-stale" : ""}${selected}">
-      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Select ${symbol}"><span class="live-symbol">${symbol}${row.stale ? '<span class="live-row-dot stale" title="Stale or unavailable market data"></span>' : ""}</span>${badge(row.signal)}</button></td>
+      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Select ${symbol}"><span class="live-symbol">${symbol}${row.stale ? '<span class="live-row-dot stale" title="Stale or unavailable market data"></span>' : ""}</span>${badge(row.signal)}${notTradable(row.symbol)}</button></td>
       <td class="live-num" data-label="Price / day"><strong>${dollars(row.price)}</strong><small class="${direction(row.change_pct)}">${pct1(row.change_pct)}</small></td>
       ${screeningCells(row, ["day_volume"])}<td class="live-num" data-metric="day_relative_volume" data-label="Day RVOL" title="Total day volume / 20-session average; not time adjusted">${ratio1(row.day_relative_volume)}</td>${metricCell(row.minute_relative_volume, ratio1(row.minute_relative_volume), "1-minute RVOL", volumeClass)}<td class="live-num" data-metric="spread_pct" data-label="Bid–ask spread" title="Ask minus bid as a percentage of the midpoint; quote ${escapeHTML(clock(row.quote_at))}">${numeric(row.spread_pct) ? `${n(row.spread_pct, 2)}%` : "—"}</td>
       <td data-label="Setup score"><span class="live-score-cell">${scoreBar(row.signal_score)}${n(row.signal_score)}</span></td>
       <td class="live-eligibility">${eligibilityText(row)}</td>
     </tr>`;
     return `<tr class="${row.stale ? "live-stale" : ""}${selected}">
-      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Open ${symbol} intraday report"><span class="live-symbol">${symbol}<span class="live-row-dot ${row.stale ? "stale" : ""}" title="${row.stale ? "Stale or unavailable market data" : "Price and quote freshness checked"}"></span></span><span class="live-setup ${levelClass(row.signal)}">${setup(row.signal)}</span></button><button type="button" class="live-candle-open" data-live-candles="${symbol}" title="Full-screen candles" aria-label="Open ${symbol} full-screen candlestick chart">${icon("trend")}</button></td>
+      <td><button class="live-stock-button" data-live-symbol="${symbol}" aria-label="Open ${symbol} intraday report"><span class="live-symbol">${symbol}<span class="live-row-dot ${row.stale ? "stale" : ""}" title="${row.stale ? "Stale or unavailable market data" : "Price and quote freshness checked"}"></span></span><span class="live-setup ${levelClass(row.signal)}">${setup(row.signal)}</span>${notTradable(row.symbol)}</button><button type="button" class="live-candle-open" data-live-candles="${symbol}" title="Full-screen candles" aria-label="Open ${symbol} full-screen candlestick chart">${icon("trend")}</button></td>
       <td class="live-num" data-label="Price / day"><strong>${dollars(row.price)}</strong><small class="${direction(row.change_pct)}">${pct(row.change_pct)}</small></td>
       ${screeningCells(row)}
       <td class="live-eligibility">${eligibilityText(row)}</td>
@@ -607,7 +611,7 @@
     ];
     const data = focusBars(row), symbol = escapeHTML(row.symbol);
     const chart = !data ? '<p class="live-chart-empty">Loading candles…</p>' : data.error && !data.bars.length ? `<p class="live-chart-empty">${escapeHTML(data.error)}</p>` : focusChart(data.bars);
-    replaceMarkup("#live-focus", `<div class="live-focus-head"><div><div class="live-focus-symbol"><h2 class="live-mono">${symbol}</h2>${badge(row.signal)}</div><p class="live-mono"><strong>${dollars(row.price)}</strong> <span class="${direction(row.change_pct)}">${pct1(row.change_pct)}</span></p></div><button type="button" class="button subtle" data-live-candles="${symbol}" aria-label="Open ${symbol} full-screen candlestick chart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>Full chart</button></div>
+    replaceMarkup("#live-focus", `<div class="live-focus-head"><div><div class="live-focus-symbol"><h2 class="live-mono">${symbol}</h2>${badge(row.signal)}${notTradable(row.symbol)}</div><p class="live-mono"><strong>${dollars(row.price)}</strong> <span class="${direction(row.change_pct)}">${pct1(row.change_pct)}</span></p></div><button type="button" class="button subtle" data-live-candles="${symbol}" aria-label="Open ${symbol} full-screen candlestick chart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>Full chart</button></div>
       <div class="live-tf" role="group" aria-label="Chart timeframe">${candleFrames.map(([tf, label]) => `<button type="button" data-live-focus-tf="${tf}" aria-pressed="${tf === view.focusTf}">${label}</button>`).join("")}</div>
       <div class="live-focus-chart">${chart}</div>
       <dl class="live-focus-metrics">${[["Day volume", short(row.day_volume)], ["Day RVOL", ratio1(row.day_relative_volume)], ["1-min RVOL", ratio1(row.minute_relative_volume)], ["Spread", numeric(row.spread_pct) ? `${n(row.spread_pct, 2)}%` : "—"], ["ATR % (14D)", numeric(row.atr_pct) ? `${n(row.atr_pct, 1)}%` : "—"], ["Setup score", `${n(row.signal_score)} / 100`]].map(([label, value]) => `<div><dt>${label}</dt><dd class="live-mono">${value}</dd></div>`).join("")}</dl>

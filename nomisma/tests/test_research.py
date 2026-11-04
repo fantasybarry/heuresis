@@ -118,19 +118,19 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result["market_phase"], "closed")
         self.assertIn("no exchange session", " ".join(result["warnings"]))
 
-    def test_all_listings_filters_inactive_otc_and_reports_coverage(self, unused_now):
+    def test_all_listings_filters_inactive_otc_flags_untradable_and_reports_coverage(self, unused_now):
         listing = [{"symbol": symbol, "status": status, "tradable": tradable, "exchange": exchange, "name": "Name " + symbol}
                    for symbol, status, tradable, exchange in (("AAA", "active", True, "NYSE"), ("BBB", "active", True, "BATS"),
                                                             ("ZZZ", "inactive", True, "NYSE"), ("OTC", "active", True, "OTC"),
                                                             ("NOPE", "active", False, "NASDAQ"))]
 
         def get(url, params, headers, stop=None):
-            return listing if url.endswith("assets") else {"AAA": stock(), "BBB": stock()}
+            return listing if url.endswith("assets") else {"AAA": stock(), "BBB": stock(), "NOPE": stock()}
 
         with patch.object(research, "_calendar", return_value=(SESSION, set())), patch.object(live, "_get_json", side_effect=get):
             result = research.discover({"source": "alpaca", "universe": "all"})
-        self.assertEqual(result["coverage"]["requested"], 2)
-        self.assertEqual([row["symbol"] for row in result["rows"]], ["AAA", "BBB"])
+        self.assertEqual(result["coverage"]["requested"], 3)
+        self.assertEqual({row["symbol"]: row["tradable"] for row in result["rows"]}, {"AAA": True, "BBB": True, "NOPE": False})
         self.assertIn("not every US security", " ".join(result["warnings"]))
 
     def test_failed_batch_does_not_return_partial_or_demo(self, unused_now):
