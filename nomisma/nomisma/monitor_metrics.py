@@ -67,8 +67,8 @@ def validate_monitor_config(payload, current=None):
     if result["buy_score"] >= result["strong_buy_score"]:
         raise ValueError("buy_score must be below strong_buy_score.")
     symbols = result["symbols"]
-    if not isinstance(symbols, list) or not 1 <= len(symbols) <= MAX_MONITOR_SYMBOLS:
-        raise ValueError("symbols must be a list of 1 to {} ticker symbols.".format(MAX_MONITOR_SYMBOLS))
+    if not isinstance(symbols, list) or not 0 <= len(symbols) <= MAX_MONITOR_SYMBOLS:
+        raise ValueError("symbols must be a list of at most {} ticker symbols.".format(MAX_MONITOR_SYMBOLS))
     normalized = []
     for symbol in symbols:
         if not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol.strip().upper()):
@@ -204,10 +204,9 @@ must never make a fresh trade or quote change the completed-bar setup score.
         prior_close = prior_bar["close"] if prior_bar else None
         last = minutes[-1] if minutes else None
         volume_at = last["t"] + _MINUTE if last else None
-        has_opening = bool(minutes) and minutes[0]["t"] == session_open
-        # A missing minute has no trades (often a trading halt), so totals and VWAP from the
-        # minutes received stay exact; only a missing opening minute or a malformed bar withholds them.
-        complete_coverage = has_opening and not invalid_minutes
+        # Minutes are requested from the open and Alpaca omits minutes without trades, so a missing minute
+        # (including the first ones, before a late first trade) keeps totals and VWAP exact; a malformed bar withholds them.
+        complete_coverage = not invalid_minutes and session_open is not None and now >= session_open
         gap_minutes = sum(int((current["t"] - previous["t"]) / _MINUTE) - 1
                           for previous, current in zip(minutes, minutes[1:]))
         session_volume = math.fsum(bar["volume"] for bar in minutes) if complete_coverage else None
@@ -286,7 +285,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
                        and _number(quote.get("ap"), 0.000001, 1000000000)
                        and quote["ap"] >= quote["bp"])
         spread = (quote["ap"] - quote["bp"]) / ((quote["ap"] + quote["bp"]) / 2) * 100 if valid_quote else None
-        opening = minutes[0]["open"] if minutes and minutes[0]["t"] == session_open else None
+        opening = minutes[0]["open"] if minutes else None  # the first regular-session trade, even when it comes after 9:30
         gap = _pct(opening, prior_close)
         change = _pct(price, prior_close)
         technical_close = last["close"] if last else None
@@ -347,8 +346,8 @@ must never make a fresh trade or quote change the completed-bar setup score.
         if prior_close is None:
             blockers.append("The split-adjusted previous-session close is unavailable.")
         if opening is None:
-            warnings.append("Gap unavailable: the exact regular-session opening minute has not been received.")
-            blockers.append("The regular-session opening minute is missing; session VWAP and volume may be incomplete.")
+            warnings.append("Gap unavailable: no completed regular-session minute has been received.")
+            blockers.append("No completed regular-session minute has been received yet.")
         if not contiguous:
             blockers.append("Twenty-one contiguous completed regular-session minutes are required.")
         # The volume minimum counts regular-session trading only; premarket volume is excluded.
@@ -397,7 +396,7 @@ must never make a fresh trade or quote change the completed-bar setup score.
         # The same complete-bar calculations power the chart and score. VWAP
         # becomes unavailable at a missing minute or missing positive VWAP.
         chart, cumulative_volume, cumulative_value = [], premarket_volume, premarket_value
-        chart_coverage = has_opening and not invalid_minutes and premarket_ok
+        chart_coverage = not invalid_minutes and premarket_ok
         for index, bar in enumerate(minutes):
             if bar["volume"] > 0:
                 chart_coverage = chart_coverage and bar["vwap"] is not None

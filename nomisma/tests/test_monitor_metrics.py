@@ -50,7 +50,7 @@ class MonitorConfigTests(unittest.TestCase):
                {"confirmation_bars": 1.5}, {"confirmation_bars": 0},
                {"cooldown_seconds": 29}, {"cooldown_seconds": 3601},
                {"cooldown_seconds": True}, {"cooldown_seconds": 30.0},
-               {"alerts_enabled": 1}, {"symbols": "DEMO"}, {"symbols": []},
+               {"alerts_enabled": 1}, {"symbols": "DEMO"},
                {"symbols": ["A"] * 51}, {"symbols": [None]}, {"symbols": ["BAD TICKER"]},
                {"symbols": ["A\nB"]}, {"symbols": ["A" * 16]},
                {"symbols": ["1ABC"]}, {"symbols": ["BRK/B"]}]
@@ -203,7 +203,7 @@ class IntradayVolumeTests(unittest.TestCase):
 
     def test_provider_day_volume_remains_separate_when_regular_history_is_incomplete(self):
         bundle, now = fixture()
-        del bundle["assets"][0]["minutes"][0]  # opening minute missing
+        bundle["assets"][0]["minutes"][3]["volume"] = -1  # malformed bar
         snapshot = bundle["assets"][0]["snapshot"]
         snapshot["dailyBar"]["v"] = 9999999
         result = row(bundle, now)
@@ -375,15 +375,14 @@ class PriceAndFloatTests(unittest.TestCase):
         self.assertAlmostEqual(result["change_pct"], (result["price"] - 1) * 100)
         self.assertIn("corporate action", " ".join(result["warnings"]))
 
-    def test_gap_missing_when_exact_opening_minute_is_absent(self):
+    def test_gap_uses_the_first_trade_when_the_opening_minute_has_none(self):
         bundle, now = fixture()
         bundle["assets"][0]["minutes"].pop(0)
+        first = bundle["assets"][0]["minutes"][0]["open"]
         result = row(bundle, now)
-        self.assertIsNone(result["gap_pct"])
-        self.assertIsNone(result["vwap"])
-        self.assertFalse(result["alert_eligible"])
-        self.assertIsNotNone(result["change_pct"])
-        self.assertIn("exact regular-session opening", " ".join(result["warnings"]))
+        self.assertAlmostEqual(result["gap_pct"], (first / result["price"] * (1 + result["change_pct"] / 100) - 1) * 100)
+        self.assertIsNotNone(result["vwap"])
+        self.assertNotIn("Gap unavailable", " ".join(result["warnings"]))
 
     def test_previous_session_reference_must_match_calendar_date(self):
         bundle, now = fixture()
@@ -557,7 +556,13 @@ class SetupSafetyTests(unittest.TestCase):
             self.assertEqual(point[key], raw[key])
         self.assertIsNone(result["chart"][7]["ema9"])
         self.assertIsNotNone(result["chart"][8]["ema9"])
-        bundle["assets"][0]["minutes"].pop(0)  # opening minute missing
+        late = bundle["assets"][0]["minutes"][1:]  # no trade in the opening minute: VWAP starts at the first trade
+        bundle["assets"][0]["minutes"] = late
+        delayed = row(bundle, now)
+        self.assertAlmostEqual(delayed["vwap"], sum(bar["vwap"] * bar["volume"] for bar in late) / sum(bar["volume"] for bar in late))
+        self.assertAlmostEqual(delayed["chart"][-1]["vwap"], delayed["vwap"])
+        self.assertNotIn("opening", " ".join(delayed["blockers"]))
+        late[3]["volume"] = -1  # malformed bar
         incomplete = row(bundle, now)
         self.assertIsNone(incomplete["chart"][-1]["vwap"])
         self.assertIsNone(incomplete["vwap"])
