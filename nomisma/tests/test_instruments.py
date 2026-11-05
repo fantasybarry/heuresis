@@ -14,14 +14,14 @@ class InstrumentTests(unittest.TestCase):
 
     def test_only_company_stock_and_depositary_shares(self):
         names = [('A', 'Acme Common Stock', 'N'), ('B', 'Company Ordinary Shares', 'N'),
-                 ('C', 'Company American Depositary Shares', 'N'),
+                 ('C', 'Company American Depositary Shares', 'N'), ('D', 'Company - Ordinary Share', 'N'),
                  ('SPY', 'SPDR Common Shares', 'Y'), ('FUND', 'Growth Fund Common Stock', 'N'),
                  ('W', 'Company Common Stock Warrants', 'N'), ('U', 'Company Units', 'N'),
                  ('P', 'Company Preferred Stock', 'N'), ('R', 'Company Rights', 'N'),
                  ('ETN', 'Bank Notes', 'N'), ('UNKNOWN', 'Unknown', 'N')]
         body = 'Symbol|Security Name|ETF|Test Issue\n' + '\n'.join(
             f'{symbol}|{name}|{etf}|N' for symbol, name, etf in names)
-        self.assertEqual(instruments._parse(body, True), {'A', 'B', 'C'})
+        self.assertEqual(instruments._parse(body, True), {'A', 'B', 'C', 'D'})
 
     def test_share_class_aliases_and_test_issues(self):
         body = ('ACT Symbol|Security Name|CQS Symbol|NASDAQ Symbol|ETF|Test Issue\n'

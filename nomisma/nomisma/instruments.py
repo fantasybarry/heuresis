@@ -17,7 +17,7 @@ _CACHE = None
 _TTL = 3600
 _BASE = "https://www.nasdaqtrader.com/dynamic/SymDir/"
 _EXCLUDED = re.compile(r"\b(etf|etn|fund|trust|warrants?|rights?|units?|preferred|preference|notes?|bonds?|debentures?|nextshares)\b", re.I)
-_STOCK = re.compile(r"\b(common (stock|shares)|ordinary shares|american depositary (shares|receipts)|american depository (shares|receipts)|ADR|ADS)\b", re.I)
+_STOCK = re.compile(r"\b(common (stock|shares?)|ordinary shares?|american depositary (shares?|receipts?)|american depository (shares?|receipts?)|ADRs?|ADSs?)\b", re.I)
 
 
 def _parse(text, nasdaq):
